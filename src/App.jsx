@@ -972,16 +972,7 @@ export default function App() {
           ].map(([key, label]) => (
             <button
               key={key}
-              onClick={() => {
-                // A "paid" session is only good for the report type it was
-                // actually paid for. Switching to the other one should not
-                // silently carry that payment over — reset to locked so a
-                // fresh pay gate appears (admin sessions are unrestricted).
-                if (access === "paid" && accessReportType && accessReportType !== key) {
-                  handleLogout();
-                }
-                setReportType(key);
-              }}
+              onClick={() => setReportType(key)}
               className="px-3 py-1.5 rounded text-xs font-bold border"
               style={{
                 borderColor: reportType === key ? GOLD : "rgba(255,255,255,0.3)",
