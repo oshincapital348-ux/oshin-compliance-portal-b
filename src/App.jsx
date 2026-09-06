@@ -28,6 +28,20 @@ function emptyLine(extra = {}) {
 
 export default function App() {
   const [tab, setTab] = useState("inputs");
+  const [showGuide, setShowGuide] = useState(() => {
+    try {
+      return localStorage.getItem("oshinGuideDismissed") !== "1";
+    } catch {
+      return true;
+    }
+  });
+  const dismissGuide = () => {
+    setShowGuide(false);
+    try {
+      localStorage.setItem("oshinGuideDismissed", "1");
+    } catch {}
+  };
+
 
   // ---------------------------------------------------------------------
   // ACCESS GATE
@@ -38,16 +52,22 @@ export default function App() {
   // ---------------------------------------------------------------------
   const [access, setAccess] = useState("locked"); // "locked" | "paid" | "admin"
   const [accessToken, setAccessToken] = useState(null);
+  // Which report a "paid" session was actually paid for ("dpr" | "cma" | null).
+  // A payment made for one report type must never unlock the other — this is
+  // the client-side half of that guarantee; the server enforces it for real
+  // in consume-access.js regardless of what this state says.
+  const [accessReportType, setAccessReportType] = useState(null);
   const [checkingLink, setCheckingLink] = useState(true);
 
   // Central place any unlock path (Razorpay, approval link, admin login)
   // goes through — persists to localStorage so a page refresh doesn't force
   // the customer to pay again mid-session.
-  const handleUnlock = (mode, token) => {
+  const handleUnlock = (mode, token, boundReportType = null) => {
     setAccess(mode);
     setAccessToken(token);
+    setAccessReportType(mode === "paid" ? (boundReportType || "dpr") : null);
     try {
-      localStorage.setItem("oshinAccess", JSON.stringify({ mode, token }));
+      localStorage.setItem("oshinAccess", JSON.stringify({ mode, token, reportType: mode === "paid" ? (boundReportType || "dpr") : null }));
     } catch {
       // localStorage can fail in rare cases (private browsing limits, etc.) —
       // access still works for this page load, just won't survive a refresh.
@@ -57,6 +77,7 @@ export default function App() {
   const handleLogout = () => {
     setAccess("locked");
     setAccessToken(null);
+    setAccessReportType(null);
     try {
       localStorage.removeItem("oshinAccess");
     } catch {}
@@ -90,8 +111,14 @@ export default function App() {
     })
       .then((r) => r.json())
       .then((data) => {
-        if (data.ok) handleUnlock(data.mode === "admin" ? "admin" : "paid", tokenToCheck);
-        else localStorage.removeItem("oshinAccess"); // stale/expired — clear it
+        if (data.ok) {
+          const mode = data.mode === "admin" ? "admin" : "paid";
+          handleUnlock(mode, tokenToCheck, data.reportType);
+          // A paid link is generated for one specific report — jump the UI
+          // straight to it, instead of leaving the customer on the wrong
+          // tab wondering why the toggle won't let them download.
+          if (mode === "paid" && data.reportType) setReportType(data.reportType);
+        } else localStorage.removeItem("oshinAccess"); // stale/expired — clear it
       })
       .catch(() => {})
       .finally(() => {
@@ -104,12 +131,44 @@ export default function App() {
 
 
 
+  // Top-level: which kind of report is being generated. "dpr" is the
+  // proposed-project term-loan report (PMEGP/MUDRA/MSME — same engine,
+  // different framing). "cma" is a structurally different assessment —
+  // it's for an EXISTING business's working-capital limit, using the
+  // Nayak Committee (turnover method) and Tandon Committee (I & II)
+  // methodologies banks actually use, not a new project's P&L/DSCR.
+  const [reportType, setReportType] = useState("dpr"); // "dpr" | "cma"
+
+  // Which loan scheme this report is for — changes eligibility framing,
+  // top-sheet labels, and PDF titles. The underlying financial engine
+  // (P&L, DSCR, Balance Sheet, Cash Flow) is identical across all three —
+  // these are standard term-loan structures, they just differ in
+  // eligibility rules and how a bank expects the report to be framed.
+  const [scheme, setScheme] = useState("pmegp"); // "pmegp" | "mudra" | "msme"
+
+  const SCHEME_LABELS = {
+    pmegp: { title: "PMEGP Project Report", short: "PMEGP" },
+    mudra: { title: "MUDRA Loan Project Report", short: "MUDRA" },
+    msme: { title: "MSME Term Loan Project Report", short: "MSME" },
+  };
+
+  // MUDRA loans are collateral-free and capped at ₹10 lakh, split into three
+  // tiers by loan amount (term loan + working capital loan combined).
+  const getMudraCategory = (totalLoan) => {
+    if (totalLoan <= 50000) return "Shishu (up to ₹50,000)";
+    if (totalLoan <= 500000) return "Kishore (₹50,000 – ₹5,00,000)";
+    if (totalLoan <= 1000000) return "Tarun (₹5,00,000 – ₹10,00,000)";
+    return "Exceeds MUDRA limit (₹10,00,000)";
+  };
+
   const [entrepreneur, setEntrepreneur] = useState({
     name: "",
     business: "",
     address: "",
     mobile: "",
     email: "",
+    pan: "",
+    udyamNo: "",
   });
 
   const [capex, setCapex] = useState({
@@ -155,10 +214,38 @@ export default function App() {
 
   const [narrative, setNarrative] = useState({ introduction: "", aboutPromoter: "" });
 
-  const defaultIntro = (business, prods) =>
-    `${business || "The enterprise"} is engaged in delivering high-quality products and reliable, timely service to customers across different market segments. The unit proposes to manufacture and supply ${
-      prods.length ? prods.map((p) => p.name).filter(Boolean).join(", ") : "the products listed above"
+  // ======================================================================
+  // CMA / WORKING CAPITAL ASSESSMENT — completely separate data model from
+  // the DPR engine above. This assesses an EXISTING business across 5
+  // periods (typically: actual, provisional, and 3 years projected).
+  // ======================================================================
+  const [cmaEntrepreneur, setCmaEntrepreneur] = useState({ name: "", business: "", address: "", mobile: "", email: "" });
+  const [cmaPeriodLabels, setCmaPeriodLabels] = useState([
+    "Actual (last FY)", "Provisional (this FY)", "Projected Yr 1", "Projected Yr 2", "Projected Yr 3",
+  ]);
+  const emptyCmaPeriod = () => ({
+    domesticSales: 0, exportSales: 0, otherIncome: 0,
+    purchases: 0, openingStock: 0, closingStock: 0,
+    sgaExpenses: 0, interest: 0, depreciation: 0,
+    otherNonOpIncome: 0, otherNonOpExpense: 0, taxProvision: 0,
+    shortTermBorrowings: 0, sundryCreditors: 0, otherCurrentLiabilities: 0,
+    termLoans: 0, otherTermLiabilities: 0,
+    shareCapital: 0,
+    cashAndBank: 0, receivables: 0, stockInTrade: 0, otherCurrentAssets: 0,
+    grossBlock: 0, depreciationToDate: 0,
+  });
+  const [cmaPeriods, setCmaPeriods] = useState(Array.from({ length: 5 }, emptyCmaPeriod));
+
+  const updateCmaPeriod = (index, field, value) => {
+    setCmaPeriods((periods) => periods.map((p, i) => (i === index ? { ...p, [field]: value } : p)));
+  };
+
+  const defaultIntro = (business, prods) => {
+    const productNames = prods.map((p) => p.name).filter(Boolean).join(", ");
+    return `${business || "The enterprise"} is engaged in delivering high-quality products and reliable, timely service to customers across different market segments. The unit proposes to manufacture and supply ${
+      productNames || "the products listed above"
     }, with a strong focus on quality, timely delivery and customer satisfaction. Growing demand in this segment has created substantial opportunity for well-run units that combine quality, durability and competitive pricing, and this project has been drawn up to meet that demand using efficient production methods and skilled workmanship.`;
+  };
 
   const defaultAbout = (name, business) =>
     `${name || "The applicant"} is the proprietor of ${business || "the proposed unit"}, a dedicated entrepreneur with a vision to build a successful, sustainable business. Recognising the growing demand in this segment, ${
@@ -237,7 +324,12 @@ export default function App() {
       const dep = depSchedule[i] ? depSchedule[i].dep : 0;
       const productionCost = rawMaterial + wagesY + repairs + power + otherOverhead + dep;
 
-      const salary = Number(admin.salary) * f;
+      // Salary is a committed staff cost — paid in full regardless of
+      // capacity utilization (you don't send staff home at 70% capacity),
+      // and grows with a standard annual increment rather than shrinking
+      // with output like variable manufacturing costs do.
+      const SALARY_ANNUAL_GROWTH = 1.05;
+      const salary = Number(admin.salary) * Math.pow(SALARY_ANNUAL_GROWTH, i);
       const telephone = Number(admin.telephone) * f;
       const stationery = Number(admin.stationery) * f;
       const advertisement = Number(admin.advertisement) * f;
@@ -307,6 +399,87 @@ export default function App() {
 
     const avgDscr = years.reduce((s, y) => s + y.dscr, 0) / (years.length || 1);
 
+    // --- Balance Sheet ---
+    // Reverse-engineered from the original reference document by cross-
+    // checking every subtotal until all five years reconciled exactly:
+    // - Term/WC Loan liability for year N = that loan's OPENING balance for
+    //   year N (i.e. balance at the start of the year, before that year's
+    //   repayment) — matches the schedule tables shown elsewhere.
+    // - "Profit" is that year's net profit added to net worth, not a
+    //   running cumulative total — this matches the reference exactly,
+    //   even though it's a simplification of true retained-earnings
+    //   accounting.
+    // - Preliminary & pre-operative expenses are written off at 25% WDV
+    //   per year, shown as a memo line but excluded from the assets total
+    //   (matches the reference — likely because a bank doesn't count a
+    //   fictitious/non-cash asset toward real net worth).
+    // - Current Assets mirrors the working-capital loan's opening balance
+    //   for that year (the working capital being financed).
+    // - Cash in Bank/Hand is the balancing plug so Total Assets always
+    //   equals Total Liabilities.
+    const balanceSheet = years.map((y, i) => {
+      const promotersCapital = ownContribution;
+      const profit = y.netProfit;
+      const termLoanLiability = termSchedule[i] ? termSchedule[i].opening : 0;
+      const wcLoanLiability = wcSchedule[i] ? wcSchedule[i].opening : 0;
+      const totalLiabilities = promotersCapital + profit + termLoanLiability + wcLoanLiability;
+
+      const grossFixedAssets = depSchedule[i] ? depSchedule[i].opening : 0;
+      const lessDepreciation = depSchedule[i] ? depSchedule[i].dep : 0;
+      const netFixedAssets = depSchedule[i] ? depSchedule[i].closing : 0;
+      const preliminaryExpenses = Number(capex.preliminary) * Math.pow(0.75, i);
+      const currentAssets = wcLoanLiability;
+      const cashInBank = totalLiabilities - netFixedAssets - currentAssets;
+      const totalAssets = netFixedAssets + currentAssets + cashInBank;
+
+      return {
+        promotersCapital, profit, termLoanLiability, wcLoanLiability, totalLiabilities,
+        grossFixedAssets, lessDepreciation, netFixedAssets, preliminaryExpenses, currentAssets, cashInBank, totalAssets,
+      };
+    });
+
+    // --- Cash Flow Statement ---
+    // Same reverse-engineering approach: inflows are net profit + non-cash
+    // depreciation added back + that year's opening loan balances + the
+    // one-time promoter's capital injection (Year 1 only). Outflows are
+    // that year's loan installments plus the working-capital funds tied up
+    // (mirrors the Current Assets figure above). Closing balance carries
+    // forward as next year's opening balance.
+    let cashOpening = 0;
+    const cashFlow = years.map((y, i) => {
+      const termLoanInflow = termSchedule[i] ? termSchedule[i].opening : 0;
+      const wcLoanInflow = wcSchedule[i] ? wcSchedule[i].opening : 0;
+      const promotersCapitalInflow = i === 0 ? ownContribution : 0;
+      const totalInflow = y.netProfit + y.dep + termLoanInflow + wcLoanInflow + promotersCapitalInflow;
+
+      const termRepayment = termSchedule[i] ? termSchedule[i].installment : 0;
+      const wcRepayment = wcSchedule[i] ? wcSchedule[i].installment : 0;
+      const currentAssetsUse = wcLoanInflow;
+      const totalOutflow = termRepayment + wcRepayment + currentAssetsUse;
+
+      const opening = cashOpening;
+      const surplus = totalInflow - totalOutflow;
+      const closing = opening + surplus;
+      cashOpening = closing;
+
+      return { totalInflow, termRepayment, wcRepayment, currentAssetsUse, totalOutflow, opening, surplus, closing };
+    });
+
+    // --- Basic ratios ---
+    // Standard definitions (current liabilities = that year's loan
+    // installments due; net worth = promoter's capital + that year's
+    // profit). These are defensible, conventional formulas — note they may
+    // not numerically match older bank templates that used a different,
+    // undocumented convention for these two specific rows.
+    const ratios = years.map((y, i) => {
+      const currentLiabilities = (termSchedule[i]?.installment || 0) + (wcSchedule[i]?.installment || 0);
+      const currentRatio = currentLiabilities > 0 ? balanceSheet[i].currentAssets / currentLiabilities : null;
+      const totalDebt = balanceSheet[i].termLoanLiability + balanceSheet[i].wcLoanLiability;
+      const netWorth = balanceSheet[i].promotersCapital + balanceSheet[i].profit;
+      const debtEquityRatio = netWorth > 0 ? totalDebt / netWorth : null; // null = not meaningful (zero/negative net worth)
+      return { currentRatio, debtEquityRatio };
+    });
+
     return {
       machineryTotal,
       fixedCapital,
@@ -328,21 +501,173 @@ export default function App() {
       depSchedule,
       years,
       avgDscr,
+      balanceSheet,
+      cashFlow,
+      ratios,
     };
   }, [capex, machinery, finance, products, capacityUtil, rawMaterials, wages, opex, admin, depRate]);
 
+  // ======================================================================
+  // CMA calculation engine. Every formula below was verified by hand
+  // against the original Suyog Tours & Travels reference document
+  // (Nayak Committee turnover method and Tandon Committee I & II) before
+  // being written here — see the independent checks run during development.
+  // ======================================================================
+  const cmaCalc = useMemo(() => {
+    let cumulativeSurplus = 0;
+
+    const periods = cmaPeriods.map((p) => {
+      // --- Form II: Operating Statement ---
+      const totalSales = Number(p.domesticSales) + Number(p.exportSales);
+      const totalIncome = totalSales + Number(p.otherIncome);
+      const costOfSales = Number(p.purchases) + Number(p.openingStock) - Number(p.closingStock);
+      const grossProfit = totalIncome - costOfSales;
+      const ebitda = grossProfit - Number(p.sgaExpenses); // operating profit before interest & depreciation
+      const operatingProfitAfterID = ebitda - Number(p.interest) - Number(p.depreciation);
+      const otherNonOpNet = Number(p.otherNonOpIncome) - Number(p.otherNonOpExpense);
+      const pbt = operatingProfitAfterID + otherNonOpNet;
+      const netProfit = pbt - Number(p.taxProvision);
+
+      cumulativeSurplus += netProfit;
+
+      // --- Form III: Balance Sheet ---
+      const totalCurrentLiabilities = Number(p.shortTermBorrowings) + Number(p.sundryCreditors) + Number(p.otherCurrentLiabilities);
+      const totalTermLiabilities = Number(p.termLoans) + Number(p.otherTermLiabilities);
+      const totalOutsideLiabilities = totalCurrentLiabilities + totalTermLiabilities;
+      const netWorth = Number(p.shareCapital) + cumulativeSurplus; // tangible net worth (assumes no intangibles)
+      const totalLiabilitiesBS = totalOutsideLiabilities + netWorth;
+
+      const totalCurrentAssets = Number(p.cashAndBank) + Number(p.receivables) + Number(p.stockInTrade) + Number(p.otherCurrentAssets);
+      const netFixedAssets = Number(p.grossBlock) - Number(p.depreciationToDate);
+      const totalAssets = totalCurrentAssets + netFixedAssets;
+
+      const netWorkingCapital = totalCurrentAssets - totalCurrentLiabilities;
+      const currentRatio = totalCurrentLiabilities > 0 ? totalCurrentAssets / totalCurrentLiabilities : null;
+      const quickRatio = totalCurrentLiabilities > 0 ? (totalCurrentAssets - Number(p.stockInTrade)) / totalCurrentLiabilities : null;
+      const tolTnwRatio = netWorth > 0 ? totalOutsideLiabilities / netWorth : null;
+
+      // --- Form V: Bank finance for working capital ---
+      // Method 1 — Nayak Committee turnover method
+      const pct25OfTurnover = totalSales * 0.25;
+      const margin5pct = totalSales * 0.05;
+      const nayakRow7 = pct25OfTurnover - margin5pct;
+      const nayakRow8 = pct25OfTurnover - netWorkingCapital;
+      const mpbfNayak = Math.min(nayakRow7, nayakRow8);
+
+      // Method 2 — Tandon Committee, First Method of Lending
+      const otherCLexclBank = Number(p.sundryCreditors) + Number(p.otherCurrentLiabilities);
+      const workingCapitalGap = totalCurrentAssets - otherCLexclBank;
+      const minNwcTandon1 = workingCapitalGap * 0.25;
+      const tandon1Row6 = workingCapitalGap - minNwcTandon1;
+      const tandon1Row7 = workingCapitalGap - netWorkingCapital;
+      const mpbfTandon1 = Math.min(tandon1Row6, tandon1Row7);
+
+      // Method 3 — Tandon Committee, Second Method of Lending
+      const minNwcTandon2 = totalCurrentAssets * 0.25;
+      const tandon2Row6 = workingCapitalGap - minNwcTandon2;
+      const tandon2Row7 = workingCapitalGap - netWorkingCapital;
+      const mpbfTandon2 = Math.min(tandon2Row6, tandon2Row7);
+
+      // --- Misc ratios ---
+      const grossProfitRatio = totalIncome > 0 ? (grossProfit / totalIncome) * 100 : null;
+      const operatingCostRatio = totalIncome > 0 ? ((costOfSales + Number(p.sgaExpenses)) / totalIncome) * 100 : null;
+      const operatingProfitRatio = totalIncome > 0 ? (ebitda / totalIncome) * 100 : null;
+      const netProfitRatio = totalIncome > 0 ? (netProfit / totalIncome) * 100 : null;
+      const interestCoverageRatio = Number(p.interest) > 0 ? ebitda / Number(p.interest) : null;
+      const debtEquityRatio = netWorth > 0 ? totalTermLiabilities / netWorth : null;
+      const debtAssetsRatio = totalAssets > 0 ? totalOutsideLiabilities / totalAssets : null;
+      const capitalTurnoverRatio = netWorth > 0 ? totalIncome / netWorth : null;
+      const totalAssetsTurnoverRatio = totalAssets > 0 ? totalIncome / totalAssets : null;
+      const returnOnCapitalEmployed = (netWorth + totalTermLiabilities) > 0 ? (ebitda / (netWorth + totalTermLiabilities)) * 100 : null;
+
+      return {
+        totalSales, totalIncome, costOfSales, grossProfit, ebitda, operatingProfitAfterID, pbt, netProfit,
+        retainedProfit: netProfit, cumulativeSurplus,
+        totalCurrentLiabilities, totalTermLiabilities, totalOutsideLiabilities, netWorth, totalLiabilitiesBS,
+        totalCurrentAssets, netFixedAssets, totalAssets, netWorkingCapital,
+        currentRatio, quickRatio, tolTnwRatio,
+        mpbfNayak, mpbfTandon1, mpbfTandon2,
+        grossProfitRatio, operatingCostRatio, operatingProfitRatio, netProfitRatio, interestCoverageRatio,
+        debtEquityRatio, debtAssetsRatio, capitalTurnoverRatio, totalAssetsTurnoverRatio, returnOnCapitalEmployed,
+      };
+    });
+
+    return { periods };
+  }, [cmaPeriods]);
+
+  // ---------- pay-to-download, with tiered pricing per project size ----------
+  // Browsing and filling in the form is free. Payment is required only at
+  // the moment of download, and the price is computed from the project
+  // cost actually entered — so this needs to happen after the form is
+  // filled in, not before. Each successful download consumes that
+  // payment (single-use, enforced in consume-access.js); a second report
+  // needs a fresh payment.
+  const [downloadBlocked, setDownloadBlocked] = useState(null);
+  const [payModalOpen, setPayModalOpen] = useState(false);
+  const [pendingDownload, setPendingDownload] = useState(null); // "pdf" | "xlsx" | null
+
+  const runDownload = (type) => {
+    if (type === "pdf") window.print();
+    else if (reportType === "cma") generateCmaExcel();
+    else generateExcel();
+  };
+
+  const requestDownload = async (type) => {
+    setDownloadBlocked(null);
+
+    if (access === "admin") {
+      runDownload(type);
+      return;
+    }
+
+    if (access === "paid" && accessToken) {
+      try {
+        const res = await fetch("/api/consume-access", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: accessToken, reportType }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          runDownload(type);
+          return;
+        }
+        setDownloadBlocked(
+          data.reason === "already-used"
+            ? "Your previous report has already been generated with this payment. Please pay again to generate a new one."
+            : data.reason === "wrong-report-type"
+            ? `That payment was for the ${data.reportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)"} report, not this one. Please pay again for this report.`
+            : "Your access has expired. Please pay again to generate a new report."
+        );
+      } catch {
+        // network hiccup — fall through to request a fresh payment
+      }
+    }
+
+    setPendingDownload(type);
+    setPayModalOpen(true);
+  };
+
+  const downloadPdf = () => requestDownload("pdf");
+  const downloadExcel = () => requestDownload("xlsx");
+
+
   // ---------- excel export ----------
-  const downloadExcel = () => {
+  const generateExcel = () => {
     const wb = XLSX.utils.book_new();
 
     const topSheet = [
       ["PROJECT AT A GLANCE"],
+      ["Loan scheme", SCHEME_LABELS[scheme].title],
+      ...(scheme === "mudra" ? [["MUDRA category", getMudraCategory(calc.termLoan + calc.wcLoan)]] : []),
       [],
       ["Name of entrepreneur", entrepreneur.name],
       ["Business / unit name", entrepreneur.business],
       ["Address", entrepreneur.address],
       ["Mobile", entrepreneur.mobile],
       ["Email", entrepreneur.email],
+      ["PAN", entrepreneur.pan],
+      ["Udyam Registration No.", entrepreneur.udyamNo],
       [],
       ["Total project cost", calc.totalProjectCost],
       ["Own contribution", calc.ownContribution],
@@ -413,15 +738,160 @@ export default function App() {
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(loanSheet), "Loan Schedules");
 
+    const bsHeader = ["Particulars", ...YEARS.map((y) => `Year ${y}`)];
+    const bsSheet = [
+      ["PROJECTED BALANCE SHEET"],
+      [],
+      bsHeader,
+      ["Promoter's capital", ...calc.balanceSheet.map((b) => Math.round(b.promotersCapital))],
+      ["Profit", ...calc.balanceSheet.map((b) => Math.round(b.profit))],
+      ["Term loan", ...calc.balanceSheet.map((b) => Math.round(b.termLoanLiability))],
+      ["Working capital loan", ...calc.balanceSheet.map((b) => Math.round(b.wcLoanLiability))],
+      ["Total liabilities", ...calc.balanceSheet.map((b) => Math.round(b.totalLiabilities))],
+      [],
+      ["Gross fixed assets", ...calc.balanceSheet.map((b) => Math.round(b.grossFixedAssets))],
+      ["Less: depreciation", ...calc.balanceSheet.map((b) => Math.round(b.lessDepreciation))],
+      ["Net fixed assets", ...calc.balanceSheet.map((b) => Math.round(b.netFixedAssets))],
+      ["Preliminary & pre-op. expenses", ...calc.balanceSheet.map((b) => Math.round(b.preliminaryExpenses))],
+      ["Current assets", ...calc.balanceSheet.map((b) => Math.round(b.currentAssets))],
+      ["Cash in bank/hand", ...calc.balanceSheet.map((b) => Math.round(b.cashInBank))],
+      ["Total assets", ...calc.balanceSheet.map((b) => Math.round(b.totalAssets))],
+      [],
+      ["Current ratio", ...calc.ratios.map((r) => r.currentRatio === null ? "N/A" : r.currentRatio.toFixed(2))],
+      ["Debt-equity ratio", ...calc.ratios.map((r) => r.debtEquityRatio === null ? "N/A" : r.debtEquityRatio.toFixed(2))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(bsSheet), "Balance Sheet");
+
+    const cfSheet = [
+      ["CASH FLOW STATEMENT"],
+      [],
+      bsHeader,
+      ["Total inflow", ...calc.cashFlow.map((c) => Math.round(c.totalInflow))],
+      ["Repayment of term loan", ...calc.cashFlow.map((c) => Math.round(c.termRepayment))],
+      ["Repayment of working capital loan", ...calc.cashFlow.map((c) => Math.round(c.wcRepayment))],
+      ["Working capital deployed", ...calc.cashFlow.map((c) => Math.round(c.currentAssetsUse))],
+      ["Total outflow", ...calc.cashFlow.map((c) => Math.round(c.totalOutflow))],
+      ["Opening cash balance", ...calc.cashFlow.map((c) => Math.round(c.opening))],
+      ["Surplus for the year", ...calc.cashFlow.map((c) => Math.round(c.surplus))],
+      ["Closing cash balance", ...calc.cashFlow.map((c) => Math.round(c.closing))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(cfSheet), "Cash Flow");
+
     XLSX.writeFile(wb, `${(entrepreneur.business || "project-report").replace(/\s+/g, "-")}.xlsx`);
+  };
+
+  const generateCmaExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const header = ["Particulars", ...cmaPeriodLabels];
+    const r2 = (n) => Math.round(n);
+    const pctOrNA = (v) => (v === null ? "N/A" : v.toFixed(2));
+
+    const topSheet = [
+      ["CMA / WORKING CAPITAL ASSESSMENT"],
+      [],
+      ["Name of entrepreneur", cmaEntrepreneur.name],
+      ["Business / unit name", cmaEntrepreneur.business],
+      ["Address", cmaEntrepreneur.address],
+      ["Mobile", cmaEntrepreneur.mobile],
+      ["Email", cmaEntrepreneur.email],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(topSheet), "Top Sheet");
+
+    const formII = [
+      ["FORM II — OPERATING STATEMENT"],
+      [],
+      header,
+      ["Domestic sales", ...cmaPeriods.map((p) => r2(p.domesticSales))],
+      ["Export sales", ...cmaPeriods.map((p) => r2(p.exportSales))],
+      ["Other income", ...cmaPeriods.map((p) => r2(p.otherIncome))],
+      ["Total income", ...cmaCalc.periods.map((p) => r2(p.totalIncome))],
+      ["Cost of sales", ...cmaCalc.periods.map((p) => r2(p.costOfSales))],
+      ["Gross profit", ...cmaCalc.periods.map((p) => r2(p.grossProfit))],
+      ["Selling, general & admin expenses", ...cmaPeriods.map((p) => r2(p.sgaExpenses))],
+      ["Operating profit (EBITDA)", ...cmaCalc.periods.map((p) => r2(p.ebitda))],
+      ["Interest", ...cmaPeriods.map((p) => r2(p.interest))],
+      ["Depreciation", ...cmaPeriods.map((p) => r2(p.depreciation))],
+      ["Profit before tax", ...cmaCalc.periods.map((p) => r2(p.pbt))],
+      ["Provision for tax", ...cmaPeriods.map((p) => r2(p.taxProvision))],
+      ["Net profit", ...cmaCalc.periods.map((p) => r2(p.netProfit))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(formII), "Form II - Operating Stmt");
+
+    const formIII = [
+      ["FORM III — ANALYSIS OF BALANCE SHEET"],
+      [],
+      header,
+      ["Short term borrowings from bank", ...cmaPeriods.map((p) => r2(p.shortTermBorrowings))],
+      ["Sundry creditors", ...cmaPeriods.map((p) => r2(p.sundryCreditors))],
+      ["Other current liabilities", ...cmaPeriods.map((p) => r2(p.otherCurrentLiabilities))],
+      ["Total current liabilities", ...cmaCalc.periods.map((p) => r2(p.totalCurrentLiabilities))],
+      ["Term loans", ...cmaPeriods.map((p) => r2(p.termLoans))],
+      ["Other term liabilities", ...cmaPeriods.map((p) => r2(p.otherTermLiabilities))],
+      ["Total term liabilities", ...cmaCalc.periods.map((p) => r2(p.totalTermLiabilities))],
+      ["Total outside liabilities", ...cmaCalc.periods.map((p) => r2(p.totalOutsideLiabilities))],
+      ["Share capital", ...cmaPeriods.map((p) => r2(p.shareCapital))],
+      ["Net worth (incl. retained profit)", ...cmaCalc.periods.map((p) => r2(p.netWorth))],
+      ["Total liabilities", ...cmaCalc.periods.map((p) => r2(p.totalLiabilitiesBS))],
+      [],
+      ["Cash & bank", ...cmaPeriods.map((p) => r2(p.cashAndBank))],
+      ["Receivables", ...cmaPeriods.map((p) => r2(p.receivables))],
+      ["Stock-in-trade", ...cmaPeriods.map((p) => r2(p.stockInTrade))],
+      ["Other current assets", ...cmaPeriods.map((p) => r2(p.otherCurrentAssets))],
+      ["Total current assets", ...cmaCalc.periods.map((p) => r2(p.totalCurrentAssets))],
+      ["Gross block", ...cmaPeriods.map((p) => r2(p.grossBlock))],
+      ["Depreciation to date", ...cmaPeriods.map((p) => r2(p.depreciationToDate))],
+      ["Net fixed assets", ...cmaCalc.periods.map((p) => r2(p.netFixedAssets))],
+      ["Total assets", ...cmaCalc.periods.map((p) => r2(p.totalAssets))],
+      [],
+      ["Net working capital", ...cmaCalc.periods.map((p) => r2(p.netWorkingCapital))],
+      ["Current ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.currentRatio))],
+      ["TOL/TNW ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.tolTnwRatio))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(formIII), "Form III - Balance Sheet");
+
+    const formV = [
+      ["FORM V — BANK FINANCE FOR WORKING CAPITAL"],
+      [],
+      header,
+      ["METHOD 1: TURNOVER METHOD (NAYAK COMMITTEE)"],
+      ["Projected turnover", ...cmaCalc.periods.map((p) => r2(p.totalSales))],
+      ["Total current assets", ...cmaCalc.periods.map((p) => r2(p.totalCurrentAssets))],
+      ["Net working capital", ...cmaCalc.periods.map((p) => r2(p.netWorkingCapital))],
+      ["MPBF (Turnover method)", ...cmaCalc.periods.map((p) => r2(p.mpbfNayak))],
+      [],
+      ["METHOD 2: TANDON COMMITTEE — FIRST METHOD OF LENDING"],
+      ["MPBF (Tandon I)", ...cmaCalc.periods.map((p) => r2(p.mpbfTandon1))],
+      [],
+      ["METHOD 3: TANDON COMMITTEE — SECOND METHOD OF LENDING"],
+      ["MPBF (Tandon II)", ...cmaCalc.periods.map((p) => r2(p.mpbfTandon2))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(formV), "Form V - MPBF");
+
+    const ratiosSheet = [
+      ["MISCELLANEOUS RATIOS"],
+      [],
+      header,
+      ["Gross profit ratio (%)", ...cmaCalc.periods.map((p) => pctOrNA(p.grossProfitRatio))],
+      ["Operating cost ratio (%)", ...cmaCalc.periods.map((p) => pctOrNA(p.operatingCostRatio))],
+      ["Operating profit ratio (%)", ...cmaCalc.periods.map((p) => pctOrNA(p.operatingProfitRatio))],
+      ["Net profit ratio (%)", ...cmaCalc.periods.map((p) => pctOrNA(p.netProfitRatio))],
+      ["Interest coverage ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.interestCoverageRatio))],
+      ["Current ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.currentRatio))],
+      ["Quick ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.quickRatio))],
+      ["Debt-equity ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.debtEquityRatio))],
+      ["TOL/TNW ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.tolTnwRatio))],
+      ["Debt-assets ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.debtAssetsRatio))],
+      ["Capital turnover ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.capitalTurnoverRatio))],
+      ["Total assets turnover ratio", ...cmaCalc.periods.map((p) => pctOrNA(p.totalAssetsTurnoverRatio))],
+      ["Return on capital employed (%)", ...cmaCalc.periods.map((p) => pctOrNA(p.returnOnCapitalEmployed))],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ratiosSheet), "Ratios");
+
+    XLSX.writeFile(wb, `${(cmaEntrepreneur.business || "cma-report").replace(/\s+/g, "-")}-CMA.xlsx`);
   };
 
   const introText = narrative.introduction || defaultIntro(entrepreneur.business, products);
   const aboutText = narrative.aboutPromoter || defaultAbout(entrepreneur.name, entrepreneur.business);
-
-  const downloadPdf = () => {
-    window.print();
-  };
 
   const inputCls =
     "w-full bg-white border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1";
@@ -447,48 +917,135 @@ export default function App() {
           <div>
             <img src="/oshin-logo.png" alt="Oshin Capital" style={{ height: 34, marginBottom: 8 }} />
             <h1 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-white text-2xl">
-              Project report generator
+              {SCHEME_LABELS[scheme].title}
             </h1>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={() => { setTab("inputs"); setShowGuide(true); try { localStorage.removeItem("oshinGuideDismissed"); } catch {} }}
+              className="flex items-center gap-2 px-3 py-2 rounded-full text-sm font-bold border"
+              style={{ borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
+              title="Show the quick guide again"
+            >
+              ?
+            </button>
+            <button
+              onClick={downloadPdf}
+              className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium border"
+              style={{ borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
+            >
+              <FileText size={16} /> Download report (PDF)
+            </button>
+            <button
+              onClick={downloadExcel}
+              className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium"
+              style={{ background: GOLD, color: INK }}
+            >
+              <Download size={16} /> Download report (.xlsx)
+            </button>
+            {access === "locked" && (
+              <button
+                onClick={() => { setPendingDownload(null); setPayModalOpen(true); }}
+                className="flex items-center gap-2 px-3 py-2 rounded text-xs font-medium border"
+                style={{ borderColor: "rgba(255,255,255,0.3)", color: "rgba(255,255,255,0.75)" }}
+              >
+                Super admin access
+              </button>
+            )}
             {access !== "locked" && (
-              <>
-                <button
-                  onClick={downloadPdf}
-                  className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium border"
-                  style={{ borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
-                >
-                  <FileText size={16} /> Download report (PDF)
-                </button>
-                <button
-                  onClick={downloadExcel}
-                  className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium"
-                  style={{ background: GOLD, color: INK }}
-                >
-                  <Download size={16} /> Download report (.xlsx)
-                </button>
-                <button
-                  onClick={handleLogout}
-                  className="flex items-center gap-2 px-3 py-2 rounded text-xs font-medium border"
-                  style={{ borderColor: "rgba(255,255,255,0.3)", color: "rgba(255,255,255,0.75)" }}
-                  title="Lock this browser again (clears saved access)"
-                >
-                  Log out
-                </button>
-              </>
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 px-3 py-2 rounded text-xs font-medium border"
+                style={{ borderColor: "rgba(255,255,255,0.3)", color: "rgba(255,255,255,0.75)" }}
+                title="Lock this browser again (clears saved access)"
+              >
+                Log out
+              </button>
             )}
           </div>
         </div>
 
+        <div className="flex gap-2 mt-4">
+          {[
+            ["dpr", "Project Report (DPR)"],
+            ["cma", "CMA / Working Capital"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => {
+                // A "paid" session is only good for the report type it was
+                // actually paid for. Switching to the other one should not
+                // silently carry that payment over — reset to locked so a
+                // fresh pay gate appears (admin sessions are unrestricted).
+                if (access === "paid" && accessReportType && accessReportType !== key) {
+                  handleLogout();
+                }
+                setReportType(key);
+              }}
+              className="px-3 py-1.5 rounded text-xs font-bold border"
+              style={{
+                borderColor: reportType === key ? GOLD : "rgba(255,255,255,0.3)",
+                background: reportType === key ? "rgba(173,138,52,0.15)" : "transparent",
+                color: reportType === key ? GOLD : "rgba(255,255,255,0.7)",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {reportType === "dpr" && (
+          <div className="flex gap-2 mt-3">
+            {Object.entries(SCHEME_LABELS).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setScheme(key)}
+                className="px-3 py-1.5 rounded-full text-xs font-medium border"
+                style={{
+                  borderColor: scheme === key ? GOLD : "rgba(255,255,255,0.25)",
+                  background: scheme === key ? GOLD : "transparent",
+                  color: scheme === key ? INK : "rgba(255,255,255,0.75)",
+                }}
+              >
+                {label.short}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {downloadBlocked && (
+          <div
+            className="mt-4 px-4 py-3 rounded text-sm no-print"
+            style={{ background: "#4a1f1f", color: "#ffd6d6", border: "1px solid #B3261E" }}
+          >
+            {downloadBlocked}{" "}
+            <button onClick={() => { setDownloadBlocked(null); setPayModalOpen(true); }} className="underline font-medium">
+              Make a new payment
+            </button>
+          </div>
+        )}
+
         {/* live sanction strip */}
         <div className="mt-5 grid grid-cols-2 md:grid-cols-5 gap-3 no-print">
-          {[
-            ["Total project cost", `₹ ${fmt(calc.totalProjectCost)}`],
-            ["Term loan", `₹ ${fmt(calc.termLoan)}`],
-            ["Working capital loan", `₹ ${fmt(calc.wcLoan)}`],
-            ["Own contribution", `₹ ${fmt(calc.ownContribution)}`],
-            ["Average DSCR", calc.avgDscr.toFixed(2)],
-          ].map(([label, val], i) => (
+          {(reportType === "dpr"
+            ? [
+                ["Total project cost", `₹ ${fmt(calc.totalProjectCost)}`],
+                ["Term loan", `₹ ${fmt(calc.termLoan)}`],
+                ["Working capital loan", `₹ ${fmt(calc.wcLoan)}`],
+                ["Own contribution", `₹ ${fmt(calc.ownContribution)}`],
+                ["Average DSCR", calc.avgDscr.toFixed(2)],
+              ]
+            : (() => {
+                const latest = cmaCalc.periods[cmaCalc.periods.length - 1];
+                return [
+                  ["Latest turnover", `₹ ${fmt(latest.totalSales)}`],
+                  ["MPBF — Turnover method", `₹ ${fmt(latest.mpbfNayak)}`],
+                  ["MPBF — Tandon I", `₹ ${fmt(latest.mpbfTandon1)}`],
+                  ["MPBF — Tandon II", `₹ ${fmt(latest.mpbfTandon2)}`],
+                  ["Current ratio", latest.currentRatio === null ? "N/A" : latest.currentRatio.toFixed(2)],
+                ];
+              })()
+          ).map(([label, val], i) => (
             <div key={i} style={{ background: INK_2, borderColor: "rgba(255,255,255,0.08)" }} className="rounded border px-3 py-2.5">
               <div style={{ color: "rgba(255,255,255,0.55)" }} className="text-[11px] uppercase tracking-wide mb-1">
                 {label}
@@ -499,13 +1056,24 @@ export default function App() {
             </div>
           ))}
         </div>
+
+        {reportType === "dpr" && scheme === "mudra" && (
+          <div className="mt-3 px-4 py-3 rounded text-sm no-print" style={{
+            background: (calc.termLoan + calc.wcLoan) > 1000000 ? "#4a1f1f" : INK_2,
+            color: (calc.termLoan + calc.wcLoan) > 1000000 ? "#ffd6d6" : "rgba(255,255,255,0.85)",
+            border: `1px solid ${(calc.termLoan + calc.wcLoan) > 1000000 ? "#B3261E" : "rgba(255,255,255,0.15)"}`,
+          }}>
+            <b>MUDRA category:</b> {getMudraCategory(calc.termLoan + calc.wcLoan)}
+            {(calc.termLoan + calc.wcLoan) > 1000000 && (
+              <> — this project's loan amount exceeds MUDRA's ₹10,00,000 collateral-free limit. Consider the MSME or PMEGP option instead.</>
+            )}
+          </div>
+        )}
       </div>
 
       {/* tabs */}
       {checkingLink ? (
         <div className="px-6 py-24 text-center text-sm" style={{ color: MUTED }}>Checking access…</div>
-      ) : access === "locked" ? (
-        <PayGate onUnlock={handleUnlock} />
       ) : (
       <>
       <div style={{ borderBottom: `1px solid ${LINE}`, background: "#fff" }} className="px-6 flex gap-1 no-print">
@@ -529,8 +1097,46 @@ export default function App() {
       </div>
 
       <div className="p-6 no-print">
-        {tab === "inputs" ? (
+        {reportType === "cma" ? (
+          <CmaInputsAndReport
+            tab={tab}
+            cmaEntrepreneur={cmaEntrepreneur}
+            setCmaEntrepreneur={setCmaEntrepreneur}
+            cmaPeriodLabels={cmaPeriodLabels}
+            setCmaPeriodLabels={setCmaPeriodLabels}
+            cmaPeriods={cmaPeriods}
+            updateCmaPeriod={updateCmaPeriod}
+            cmaCalc={cmaCalc}
+          />
+        ) : tab === "inputs" ? (
           <div className="space-y-6 max-w-5xl">
+            {showGuide && (
+              <div style={{ background: GOLD_L, border: `1px solid ${LINE}`, borderRadius: 10 }} className="p-5 relative">
+                <button
+                  onClick={dismissGuide}
+                  className="absolute top-3 right-3 text-xs underline"
+                  style={{ color: MUTED }}
+                >
+                  Dismiss
+                </button>
+                <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-[15px] mb-3">
+                  Quick guide — how this works
+                </h2>
+                <ol className="text-sm space-y-1.5 list-decimal list-inside" style={{ color: TEXT }}>
+                  <li>Fill in your name, business, and contact details below.</li>
+                  <li>Enter what you're spending on machinery/equipment — add a row for each item.</li>
+                  <li>List your products and expected yearly sales at full capacity.</li>
+                  <li>Add your raw materials, staff wages, and running expenses (rent, power, etc.).</li>
+                  <li>Fill in a few final details — employment, place, and report date.</li>
+                  <li>Switch to the <b>Generated report</b> tab above to preview everything.</li>
+                  <li>Click <b>Download report</b> to get your PDF or Excel file — bank-ready.</li>
+                </ol>
+                <p className="text-xs mt-3" style={{ color: MUTED }}>
+                  Tip: figures marked "at 100% capacity" mean your maximum yearly output if running at full scale — the tool automatically scales this down for each year using the capacity percentages you set.
+                </p>
+              </div>
+            )}
+
             {/* entrepreneur */}
             <Section icon={Building2} title="Entrepreneur & unit details">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -545,6 +1151,15 @@ export default function App() {
                 </Field>
                 <Field label="Mobile">
                   <input className={inputCls} style={inputStyle} value={entrepreneur.mobile} onChange={(e) => setEntrepreneur({ ...entrepreneur, mobile: e.target.value })} />
+                </Field>
+                <Field label="Email">
+                  <input type="email" className={inputCls} style={inputStyle} value={entrepreneur.email} onChange={(e) => setEntrepreneur({ ...entrepreneur, email: e.target.value })} />
+                </Field>
+                <Field label="PAN (optional)">
+                  <input className={inputCls} style={inputStyle} value={entrepreneur.pan} onChange={(e) => setEntrepreneur({ ...entrepreneur, pan: e.target.value.toUpperCase() })} placeholder="e.g. HBVPS4301F" />
+                </Field>
+                <Field label="Udyam Registration No. (optional)">
+                  <input className={inputCls} style={inputStyle} value={entrepreneur.udyamNo} onChange={(e) => setEntrepreneur({ ...entrepreneur, udyamNo: e.target.value.toUpperCase() })} placeholder="e.g. UDYAM-MH-20-0352266" />
                 </Field>
               </div>
             </Section>
@@ -688,29 +1303,81 @@ export default function App() {
         )}
       </div>
 
-      <PrintableReport
-        entrepreneur={entrepreneur}
-        calc={calc}
-        finance={finance}
-        capex={capex}
-        machinery={machinery}
-        products={products}
-        rawMaterials={rawMaterials}
-        wages={wages}
-        opex={opex}
-        admin={admin}
-        depRate={depRate}
-        details={details}
-        introText={introText}
-        aboutText={aboutText}
-      />
+      {reportType === "dpr" && (
+        <PrintableReport
+          entrepreneur={entrepreneur}
+          calc={calc}
+          finance={finance}
+          capex={capex}
+          machinery={machinery}
+          products={products}
+          rawMaterials={rawMaterials}
+          wages={wages}
+          opex={opex}
+          admin={admin}
+          depRate={depRate}
+          details={details}
+          introText={introText}
+          aboutText={aboutText}
+          scheme={scheme}
+          schemeTitle={SCHEME_LABELS[scheme].title}
+          mudraCategory={scheme === "mudra" ? getMudraCategory(calc.termLoan + calc.wcLoan) : null}
+        />
+      )}
+      {reportType === "cma" && (
+        <CmaPrintableReport
+          entrepreneur={cmaEntrepreneur}
+          periodLabels={cmaPeriodLabels}
+          periods={cmaPeriods}
+          calc={cmaCalc}
+        />
+      )}
       </>
+
+      )}
+
+      {payModalOpen && (
+        <div
+          className="fixed inset-0 flex items-center justify-center p-4 no-print"
+          style={{ background: "rgba(21,34,56,0.6)", zIndex: 50 }}
+          onClick={(e) => { if (e.target === e.currentTarget) setPayModalOpen(false); }}
+        >
+          <div className="w-full max-w-md">
+            <PayGate
+              reportType={reportType}
+              projectCost={reportType === "cma" ? (cmaCalc.periods[cmaCalc.periods.length - 1]?.totalSales || 0) : calc.totalProjectCost}
+              onClose={() => { setPayModalOpen(false); setPendingDownload(null); }}
+              onUnlock={(mode, token, boundReportType) => {
+                handleUnlock(mode, token, boundReportType);
+                setPayModalOpen(false);
+                if (pendingDownload) {
+                  if (mode === "admin") {
+                    runDownload(pendingDownload);
+                    setPendingDownload(null);
+                  } else {
+                    fetch("/api/consume-access", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ token, reportType }),
+                    })
+                      .then((r) => r.json())
+                      .then((data) => {
+                        if (data.ok) runDownload(pendingDownload);
+                        else setDownloadBlocked("Payment succeeded but the report could not be generated. Please contact support.");
+                      })
+                      .finally(() => setPendingDownload(null));
+                  }
+                }
+              }}
+            />
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-function PayGate({ onUnlock }) {
+function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr" }) {
   const [mode, setMode] = useState("choose"); // "choose" | "qr" | "admin"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -723,10 +1390,37 @@ function PayGate({ onUnlock }) {
   const [adminToken, setAdminToken] = useState(null);
   const [approveUtr, setApproveUtr] = useState("");
   const [approveContact, setApproveContact] = useState("");
+  const [approveAmount, setApproveAmount] = useState("");
+  const [approveReportType, setApproveReportType] = useState("dpr"); // which report this link is good for
   const [generatedLink, setGeneratedLink] = useState("");
+  const [emailSent, setEmailSent] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const [payDetails, setPayDetails] = useState(null); // { upiId, amount, qrDataUrl }
+
+  const [stats, setStats] = useState(null); // { configured, count, recent }
+  const [statsLoading, setStatsLoading] = useState(false);
+
+  // The fee depends on the project cost entered in the form — fetched from
+  // the server (which owns the authoritative pricing tiers) so what's
+  // displayed here always matches what actually gets charged.
+  const [fee, setFee] = useState(null);
+  const [feeLoading, setFeeLoading] = useState(true);
+  // Whether Razorpay is actually able to take real payments right now
+  // (false while your account's website review is pending, or if test
+  // keys are still in place) — drives whether "Pay online" is shown at all.
+  const [razorpayLive, setRazorpayLive] = useState(true);
+  useEffect(() => {
+    setFeeLoading(true);
+    fetch(`/api/get-fee?projectCost=${encodeURIComponent(projectCost)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        setFee(data.fee);
+        setRazorpayLive(Boolean(data.razorpayLive));
+      })
+      .catch(() => setFee(null))
+      .finally(() => setFeeLoading(false));
+  }, [projectCost]);
 
   // ---- Razorpay: opens in this same window, verifies server-side via
   // signature, and unlocks the software immediately on success — no link
@@ -736,7 +1430,11 @@ function PayGate({ onUnlock }) {
     setBusy(true);
     setError("");
     try {
-      const orderRes = await fetch("/api/create-razorpay-order", { method: "POST" });
+      const orderRes = await fetch("/api/create-razorpay-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectCost, reportType }),
+      });
       if (!orderRes.ok) throw new Error("Could not start payment. Please try again.");
       const order = await orderRes.json();
 
@@ -756,7 +1454,7 @@ function PayGate({ onUnlock }) {
               body: JSON.stringify(response),
             });
             const verify = await verifyRes.json();
-            if (verify.ok) onUnlock("paid", verify.accessToken);
+            if (verify.ok) onUnlock("paid", verify.accessToken, verify.reportType);
             else setError("Payment could not be verified. Contact support if you were charged.");
           } catch {
             setError("Payment verification failed. Contact support if you were charged.");
@@ -785,7 +1483,7 @@ function PayGate({ onUnlock }) {
     setBusy(true);
     setError("");
     try {
-      const res = await fetch("/api/get-payment-details");
+      const res = await fetch(`/api/get-payment-details?projectCost=${encodeURIComponent(projectCost)}`);
       if (!res.ok) throw new Error("Could not load payment details.");
       const { upiId, amount, payeeName } = await res.json();
 
@@ -813,7 +1511,7 @@ function PayGate({ onUnlock }) {
       const res = await fetch("/api/submit-upi-claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ utr, contact }),
+        body: JSON.stringify({ utr, contact, amount: payDetails?.amount || null, reportType }),
       });
       if (!res.ok) throw new Error("Could not submit. Please try again.");
       setUpiSubmitted(true);
@@ -832,7 +1530,7 @@ function PayGate({ onUnlock }) {
       const res = await fetch("/api/verify-admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: adminCode }),
+        body: JSON.stringify({ code: adminCode.trim() }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -852,16 +1550,17 @@ function PayGate({ onUnlock }) {
     setBusy(true);
     setError("");
     setGeneratedLink("");
+    setEmailSent(false);
     try {
       const res = await fetch("/api/approve-claim", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({ contact: approveContact, utr: approveUtr }),
+        body: JSON.stringify({ contact: approveContact, utr: approveUtr, amount: approveAmount || null, reportType: approveReportType }),
       });
       const data = await res.json();
       if (!data.ok) throw new Error("Could not generate link.");
-      const link = `${window.location.origin}${window.location.pathname}?access=${data.accessToken}`;
-      setGeneratedLink(link);
+      setGeneratedLink(data.link);
+      setEmailSent(Boolean(data.emailSent));
     } catch (e) {
       setError(e.message);
     } finally {
@@ -875,26 +1574,60 @@ function PayGate({ onUnlock }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const loadStats = async () => {
+    setStatsLoading(true);
+    try {
+      const res = await fetch("/api/admin-stats", {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+      const data = await res.json();
+      setStats(data);
+    } catch {
+      setStats({ configured: false, count: 0, recent: [] });
+    } finally {
+      setStatsLoading(false);
+    }
+  };
+
   return (
-    <div className="px-6 py-16 flex justify-center">
-      <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 12, maxWidth: 460 }} className="w-full p-8 text-center">
+    <div style={{ background: "#fff", border: `1px solid ${LINE}`, borderRadius: 12, maxWidth: 460, position: "relative" }} className="w-full p-8 text-center mx-auto">
         <img src="/oshin-logo.png" alt="Oshin Capital" style={{ height: 32, margin: "0 auto 12px" }} />
+        {onClose && (
+          <button onClick={onClose} className="absolute top-4 right-4 text-lg" style={{ color: MUTED }} aria-label="Close">
+            ×
+          </button>
+        )}
+
         <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-xl mb-3">
           Generate your project report
         </h2>
         <p className="text-sm mb-6" style={{ color: MUTED }}>
-          Browsing this tool is free. To enter your project details and generate a bank-ready
-          report (Excel + PDF), a report-generation fee applies.
+          {feeLoading ? (
+            "Calculating your fee based on project size…"
+          ) : fee !== null ? (
+            <>
+              Based on your figures, the report-generation fee is <b style={{ color: TEXT }}>₹{fee}</b>.
+            </>
+          ) : (
+            "A report-generation fee applies, based on your project size."
+          )}
         </p>
 
         {error && <p className="text-xs mb-4" style={{ color: "#B3261E" }}>{error}</p>}
 
         {mode === "choose" && (
           <div className="space-y-2">
-            <button onClick={payWithRazorpay} disabled={busy} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>
-              {busy ? "Opening payment…" : "Pay online — instant access"}
-            </button>
-            <button onClick={openQr} disabled={busy} className="w-full py-2.5 rounded text-sm font-medium border" style={{ borderColor: LINE, color: TEXT }}>
+            {razorpayLive ? (
+              <button onClick={payWithRazorpay} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>
+                {busy ? "Opening payment…" : `Pay online${fee !== null ? ` ₹${fee}` : ""} — instant access`}
+              </button>
+            ) : (
+              <p className="text-xs px-1 pb-1" style={{ color: MUTED }}>
+                Instant card/online payment is temporarily unavailable while our payment provider finishes account
+                verification. Please use the QR code below in the meantime — it works right now.
+              </p>
+            )}
+            <button onClick={openQr} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium border" style={{ borderColor: LINE, color: TEXT }}>
               {busy ? "Loading…" : "Scan QR to pay (UPI, no gateway fee)"}
             </button>
             <button onClick={() => setMode("admin")} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>
@@ -902,6 +1635,17 @@ function PayGate({ onUnlock }) {
             </button>
           </div>
         )}
+
+        <div className="mt-6 pt-4 text-xs" style={{ borderTop: `1px solid ${LINE}`, color: MUTED }}>
+          Need help? Email{" "}
+          <a href="mailto:support@oshin-capital.com" style={{ color: INK, textDecoration: "underline" }}>
+            support@oshin-capital.com
+          </a>{" "}
+          or WhatsApp{" "}
+          <a href="https://wa.me/919503945982" target="_blank" rel="noreferrer" style={{ color: INK, textDecoration: "underline" }}>
+            +91 95039 45982
+          </a>
+        </div>
 
         {mode === "qr" && !upiSubmitted && (
           <div>
@@ -958,6 +1702,26 @@ function PayGate({ onUnlock }) {
 
             <div style={{ borderTop: `1px solid ${LINE}` }} className="pt-4">
               <p className="text-xs uppercase tracking-wide mb-3 text-center" style={{ color: MUTED }}>Approve a customer's payment</p>
+              <div className="flex gap-2 mb-2">
+                {[["dpr", "Project Report (DPR)"], ["cma", "CMA / Working Capital"]].map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setApproveReportType(key)}
+                    className="flex-1 py-2 rounded text-xs font-medium border"
+                    style={{
+                      borderColor: approveReportType === key ? GOLD : LINE,
+                      background: approveReportType === key ? GOLD_L : "transparent",
+                      color: approveReportType === key ? INK : MUTED,
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs mb-2" style={{ color: MUTED }}>
+                Pick which report this payment was for — the link only unlocks that one.
+              </p>
               <input
                 className="w-full border rounded px-2 py-2 text-sm mb-2"
                 style={{ borderColor: LINE }}
@@ -966,11 +1730,19 @@ function PayGate({ onUnlock }) {
                 onChange={(e) => setApproveUtr(e.target.value)}
               />
               <input
-                className="w-full border rounded px-2 py-2 text-sm mb-3"
+                className="w-full border rounded px-2 py-2 text-sm mb-2"
                 style={{ borderColor: LINE }}
                 placeholder="Customer's email or mobile"
                 value={approveContact}
                 onChange={(e) => setApproveContact(e.target.value)}
+              />
+              <input
+                type="number"
+                className="w-full border rounded px-2 py-2 text-sm mb-3"
+                style={{ borderColor: LINE }}
+                placeholder="Amount received (₹)"
+                value={approveAmount}
+                onChange={(e) => setApproveAmount(e.target.value)}
               />
               <button
                 onClick={approveClaim}
@@ -983,19 +1755,89 @@ function PayGate({ onUnlock }) {
 
               {generatedLink && (
                 <div className="mt-3 p-3 rounded text-xs break-all" style={{ background: GOLD_L, border: `1px solid ${LINE}` }}>
-                  <p className="mb-2" style={{ color: MUTED }}>Send this link to the customer — opening it unlocks the report generator automatically, valid for 7 days:</p>
+                  {emailSent ? (
+                    <p className="mb-2 font-medium" style={{ color: TEXT }}>
+                      ✓ Emailed automatically to {approveContact}. No further action needed unless it doesn't arrive.
+                    </p>
+                  ) : (
+                    <p className="mb-2" style={{ color: MUTED }}>
+                      {approveContact.includes("@")
+                        ? "Couldn't auto-email this (check RESEND_API_KEY is set) — send it manually below."
+                        : "This contact looks like a phone number — WhatsApp it with one click, or copy the link below."}{" "}
+                      Opening it unlocks the <b style={{ color: TEXT }}>{approveReportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)"}</b>{" "}
+                      generator automatically. Valid for 24 hours, one report only.
+                    </p>
+                  )}
                   <p className="font-mono mb-2">{generatedLink}</p>
-                  <button onClick={copyLink} className="text-xs underline" style={{ color: INK }}>
-                    {copied ? "Copied!" : "Copy link"}
-                  </button>
+                  <div className="flex gap-3">
+                    <button onClick={copyLink} className="text-xs underline" style={{ color: INK }}>
+                      {copied ? "Copied!" : "Copy link"}
+                    </button>
+                    {!approveContact.includes("@") && (
+                      <a
+                        href={`https://wa.me/${approveContact.replace(/[^\d]/g, "")}?text=${encodeURIComponent(
+                          `Hi! Your payment is confirmed. Click here to generate your report: ${generatedLink}`
+                        )}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs underline"
+                        style={{ color: INK }}
+                      >
+                        Send via WhatsApp
+                      </a>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
 
-            <button onClick={() => { setMode("choose"); setGeneratedLink(""); setAdminToken(null); }} className="w-full pt-4 text-xs underline text-center" style={{ color: MUTED }}>Back</button>
+            <div style={{ borderTop: `1px solid ${LINE}` }} className="pt-4 mt-4">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs uppercase tracking-wide" style={{ color: MUTED }}>Activity</p>
+                <button onClick={loadStats} disabled={statsLoading} className="text-xs underline" style={{ color: INK }}>
+                  {statsLoading ? "Loading…" : stats ? "Refresh" : "Load activity"}
+                </button>
+              </div>
+
+              {stats && !stats.configured && (
+                <p className="text-xs" style={{ color: MUTED }}>
+                  Activity tracking isn't set up yet — add a free Upstash Redis database (Vercel → Storage → Create Database) and set <code>UPSTASH_REDIS_REST_URL</code> / <code>UPSTASH_REDIS_REST_TOKEN</code> to start recording transactions.
+                </p>
+              )}
+
+              {stats && stats.configured && (
+                <>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <div className="rounded p-3" style={{ background: GOLD_L, border: `1px solid ${LINE}` }}>
+                      <p style={{ color: MUTED }} className="text-xs">Reports generated</p>
+                      <p className="text-2xl font-bold" style={{ color: INK }}>{stats.count}</p>
+                    </div>
+                    <div className="rounded p-3" style={{ background: GOLD_L, border: `1px solid ${LINE}` }}>
+                      <p style={{ color: MUTED }} className="text-xs">Revenue collected</p>
+                      <p className="text-2xl font-bold" style={{ color: INK }}>₹{stats.revenue.toLocaleString("en-IN")}</p>
+                    </div>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {stats.recent.length === 0 && <p className="text-xs" style={{ color: MUTED }}>No activity yet.</p>}
+                    {stats.recent.map((r, i) => (
+                      <div key={i} className="text-xs p-2 rounded" style={{ background: "#fafafa", border: `1px solid ${LINE}` }}>
+                        <span className="font-medium">{r.method}</span>
+                        {r.reportType && <span> &middot; {r.reportType === "cma" ? "CMA" : "DPR"}</span>}
+                        {r.amount && <span> &middot; ₹{r.amount}</span>}
+                        {r.status === "pending" && <span style={{ color: "#B3261E" }}> &middot; pending</span>}
+                        <span style={{ color: MUTED }}> &middot; {new Date(r.at).toLocaleString()}</span>
+                        {r.contact && <div style={{ color: MUTED }}>{r.contact}</div>}
+                        {r.utr && <div style={{ color: MUTED }}>UTR: {r.utr}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <button onClick={() => { setMode("choose"); setGeneratedLink(""); setAdminToken(null); setStats(null); }} className="w-full pt-4 text-xs underline text-center" style={{ color: MUTED }}>Back</button>
           </div>
         )}
-      </div>
     </div>
   );
 }
@@ -1027,6 +1869,7 @@ function NumInput({ value, onChange }) {
       type="number"
       value={value}
       onChange={(e) => onChange(e.target.value === "" ? 0 : Number(e.target.value))}
+      onFocus={(e) => e.target.select()}
       className="w-full bg-white border rounded px-2 py-1.5 text-sm focus:outline-none"
       style={{ borderColor: LINE, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}
     />
@@ -1123,7 +1966,7 @@ function ReportTable({ title, rows }) {
   );
 }
 
-function PrintableReport({ entrepreneur, calc, finance, capex, machinery, products, rawMaterials, wages, opex, admin, depRate, details, introText, aboutText }) {
+function PrintableReport({ entrepreneur, calc, finance, capex, machinery, products, rawMaterials, wages, opex, admin, depRate, details, introText, aboutText, scheme, schemeTitle, mudraCategory }) {
   const y = calc.years;
   const rmList = rawMaterials.map((r) => r.name).filter(Boolean).join(", ");
 
@@ -1132,21 +1975,20 @@ function PrintableReport({ entrepreneur, calc, finance, capex, machinery, produc
       {/* PAGE 1 — COVER PAGE: LETTERHEAD + INTRODUCTION + PROMOTER */}
       <div className="print-page" style={{ padding: 0 }}>
         <div style={{ background: "#152238", padding: "28px 34px", color: "#fff" }}>
-          <img src="/oshin-logo.png" alt="Oshin Capital" style={{ height: 30, marginBottom: 14, filter: "brightness(0) invert(1)" }} />
           <p style={{ fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", color: "#AD8A34", margin: 0 }}>
-            Detailed Project Report
+            {schemeTitle || "Detailed Project Report"}
           </p>
           <h1 style={{ fontFamily: "Georgia, 'Times New Roman', serif", fontSize: 24, margin: "6px 0 2px" }}>
             {entrepreneur.business || "Proposed Enterprise"}
           </h1>
-          <p style={{ fontSize: 12, color: "#cfd6e4", margin: 0 }}>Prepared for {entrepreneur.name || "the applicant"} &middot; {details.date}</p>
+          <p style={{ fontSize: 12, color: "#cfd6e4", margin: 0 }}>Promoter: {entrepreneur.name || "—"} &middot; {details.date}</p>
         </div>
 
         <div style={{ display: "flex", borderBottom: "2px solid #AD8A34" }}>
           {[
             ["Total project cost", `Rs. ${fmt(calc.totalProjectCost)}`],
             ["Term loan sought", `Rs. ${fmt(calc.termLoan)}`],
-            ["Avg. DSCR", calc.avgDscr.toFixed(2)],
+            [mudraCategory ? "MUDRA category" : "Avg. DSCR", mudraCategory || calc.avgDscr.toFixed(2)],
           ].map(([label, val], i) => (
             <div key={i} style={{ flex: 1, padding: "12px 16px", borderRight: i < 2 ? "1px solid #eee" : "none", background: "#f7f5ef" }}>
               <p style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "#8a8574", margin: "0 0 3px" }}>{label}</p>
@@ -1166,29 +2008,37 @@ function PrintableReport({ entrepreneur, calc, finance, capex, machinery, produc
       {/* PAGE 2 — TOP SHEET */}
       <div className="print-page">
         <h2 style={{ textAlign: "center", textDecoration: "underline", fontSize: 15 }}>Project at a glance — top sheet</h2>
+        <p style={{ textAlign: "center", fontSize: 11, color: "#666", marginTop: 4 }}>
+          Loan scheme: <b>{schemeTitle || "PMEGP Project Report"}</b>
+          {mudraCategory && <> &middot; Category: <b>{mudraCategory}</b></>}
+        </p>
         <table className="print-table" style={{ marginTop: 14 }}>
           <tbody>
             <tr><td style={{ width: 28 }}>1</td><td>Name of the entrepreneur</td><td><b>{entrepreneur.name}</b></td></tr>
             <tr><td>2</td><td>Constitution</td><td>Individual</td></tr>
-            <tr><td>3</td><td>Unit address</td><td>{entrepreneur.address}<br />Mobile: {entrepreneur.mobile} &nbsp; Email: {entrepreneur.email}</td></tr>
-            <tr><td>4</td><td>Name of the project / business</td><td>{entrepreneur.business}</td></tr>
-            <tr><td>5</td><td>Cost of project</td><td>Rs. {fmt(calc.totalProjectCost)}</td></tr>
+            <tr><td>3</td><td>Mobile</td><td>{entrepreneur.mobile}</td></tr>
+            <tr><td>4</td><td>Email</td><td>{entrepreneur.email}</td></tr>
+            <tr><td>5</td><td>PAN</td><td>{entrepreneur.pan}</td></tr>
+            <tr><td>6</td><td>Udyam Registration No.</td><td>{entrepreneur.udyamNo}</td></tr>
+            <tr><td>7</td><td>Unit address</td><td>{entrepreneur.address}</td></tr>
+            <tr><td>8</td><td>Name of the project / business</td><td>{entrepreneur.business}</td></tr>
+            <tr><td>9</td><td>Cost of project</td><td>Rs. {fmt(calc.totalProjectCost)}</td></tr>
             <tr>
-              <td>6</td><td>Means of finance</td>
+              <td>10</td><td>Means of finance</td>
               <td>
                 Term loan: Rs. {fmt(calc.termLoan)}<br />
                 Working capital loan: Rs. {fmt(calc.wcLoan)}<br />
                 Own contribution: Rs. {fmt(calc.ownContribution)}
               </td>
             </tr>
-            <tr><td>7</td><td>Average debt service coverage ratio</td><td>{calc.avgDscr.toFixed(2)}</td></tr>
-            <tr><td>8</td><td>Pay back period</td><td>{details.payBackYears} years</td></tr>
-            <tr><td>9</td><td>Project implementation period</td><td>{details.implementationMonths} months</td></tr>
-            <tr><td>10</td><td>Break even point (year 1)</td><td>{pct(y[0]?.bepPct || 0)}</td></tr>
-            <tr><td>11</td><td>Employment</td><td>{details.employment}</td></tr>
-            <tr><td>12</td><td>Power requirement</td><td>{details.powerRequirement}</td></tr>
-            <tr><td>13</td><td>Major raw materials</td><td>{rmList}</td></tr>
-            <tr><td>14</td><td>Estimated annual sales turnover (100% capacity)</td><td>Rs. {fmt(calc.salesAt100)}</td></tr>
+            <tr><td>11</td><td>Average debt service coverage ratio</td><td>{calc.avgDscr.toFixed(2)}</td></tr>
+            <tr><td>12</td><td>Pay back period</td><td>{details.payBackYears} years</td></tr>
+            <tr><td>13</td><td>Project implementation period</td><td>{details.implementationMonths} months</td></tr>
+            <tr><td>14</td><td>Break even point (year 1)</td><td>{pct(y[0]?.bepPct || 0)}</td></tr>
+            <tr><td>15</td><td>Employment</td><td>{details.employment}</td></tr>
+            <tr><td>16</td><td>Power requirement</td><td>{details.powerRequirement}</td></tr>
+            <tr><td>17</td><td>Major raw materials</td><td>{rmList}</td></tr>
+            <tr><td>18</td><td>Estimated annual sales turnover (100% capacity)</td><td>Rs. {fmt(calc.salesAt100)}</td></tr>
           </tbody>
         </table>
       </div>
@@ -1345,7 +2195,7 @@ function PrintableReport({ entrepreneur, calc, finance, capex, machinery, produc
           <thead><tr><th>Particulars</th>{YEARS.map((yr) => <th key={yr}>Year {yr}</th>)}</tr></thead>
           <tbody>
             <tr><td>Net profit + depreciation</td>{y.map((r, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(r.netProfit + r.dep)}</td>)}</tr>
-            <tr><td>Interest + installment</td>{y.map((r, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(r.termInterest + r.termInstallment + r.wcInterest + r.wcInstallment)}</td>)}</tr>
+            <tr><td>Interest + installment</td>{y.map((r, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(r.termInterest + r.termInstallment + r.wcInterest)}</td>)}</tr>
             <tr><td><b>DSCR</b></td>{y.map((r, i) => <td key={i} style={{ textAlign: "right" }}><b>{r.dscr.toFixed(2)}</b></td>)}</tr>
           </tbody>
         </table>
@@ -1363,7 +2213,58 @@ function PrintableReport({ entrepreneur, calc, finance, capex, machinery, produc
         </table>
       </div>
 
-      {/* PAGE 8 — SIGNATURE */}
+      {/* PAGE 8 — PROJECTED BALANCE SHEET + RATIOS */}
+      <div className="print-page">
+        <h3 style={{ fontSize: 13 }}>11. Projected Balance Sheet</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{YEARS.map((yr) => <th key={yr}>Year {yr}</th>)}</tr></thead>
+          <tbody>
+            <tr><td colSpan={6}><b>Liabilities</b></td></tr>
+            <tr><td>Promoter's capital</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.promotersCapital)}</td>)}</tr>
+            <tr><td>Profit</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.profit)}</td>)}</tr>
+            <tr><td>Term loan</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.termLoanLiability)}</td>)}</tr>
+            <tr><td>Working capital loan</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.wcLoanLiability)}</td>)}</tr>
+            <tr><td><b>Total liabilities</b></td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}><b>{fmt(b.totalLiabilities)}</b></td>)}</tr>
+            <tr><td colSpan={6}><b>Assets</b></td></tr>
+            <tr><td>Gross fixed assets</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.grossFixedAssets)}</td>)}</tr>
+            <tr><td>Less: depreciation</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.lessDepreciation)}</td>)}</tr>
+            <tr><td>Net fixed assets</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.netFixedAssets)}</td>)}</tr>
+            <tr><td>Preliminary &amp; pre-op. expenses</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.preliminaryExpenses)}</td>)}</tr>
+            <tr><td>Current assets</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.currentAssets)}</td>)}</tr>
+            <tr><td>Cash in bank/hand</td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(b.cashInBank)}</td>)}</tr>
+            <tr><td><b>Total assets</b></td>{calc.balanceSheet.map((b, i) => <td key={i} style={{ textAlign: "right" }}><b>{fmt(b.totalAssets)}</b></td>)}</tr>
+          </tbody>
+        </table>
+
+        <h3 style={{ fontSize: 13, marginTop: 16 }}>12. Ratio analysis</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{YEARS.map((yr) => <th key={yr}>Year {yr}</th>)}</tr></thead>
+          <tbody>
+            <tr><td>Current ratio</td>{calc.ratios.map((r, i) => <td key={i} style={{ textAlign: "right" }}>{r.currentRatio === null ? "N/A" : r.currentRatio.toFixed(2)}</td>)}</tr>
+            <tr><td>Debt-equity ratio</td>{calc.ratios.map((r, i) => <td key={i} style={{ textAlign: "right" }}>{r.debtEquityRatio === null ? "N/A" : r.debtEquityRatio.toFixed(2)}</td>)}</tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* PAGE 9 — CASH FLOW STATEMENT */}
+      <div className="print-page">
+        <h3 style={{ fontSize: 13 }}>13. Cash Flow Statement</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{YEARS.map((yr) => <th key={yr}>Year {yr}</th>)}</tr></thead>
+          <tbody>
+            <tr><td>Total inflow (profit + depreciation + loans drawn)</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.totalInflow)}</td>)}</tr>
+            <tr><td>Repayment of term loan</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.termRepayment)}</td>)}</tr>
+            <tr><td>Repayment of working capital loan</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.wcRepayment)}</td>)}</tr>
+            <tr><td>Working capital deployed</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.currentAssetsUse)}</td>)}</tr>
+            <tr><td><b>Total outflow</b></td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}><b>{fmt(c.totalOutflow)}</b></td>)}</tr>
+            <tr><td>Opening cash balance</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.opening)}</td>)}</tr>
+            <tr><td>Surplus for the year</td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}>{fmt(c.surplus)}</td>)}</tr>
+            <tr><td><b>Closing cash balance</b></td>{calc.cashFlow.map((c, i) => <td key={i} style={{ textAlign: "right" }}><b>{fmt(c.closing)}</b></td>)}</tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* PAGE 10 — SIGNATURE */}
       <div className="print-page">
         <p style={{ fontSize: 12.5, marginTop: 40 }}>
           This project report has been prepared based on the data furnished by the entrepreneur whose details are given in the application.
@@ -1378,8 +2279,323 @@ function PrintableReport({ entrepreneur, calc, finance, capex, machinery, produc
             <p style={{ fontSize: 13, fontWeight: "bold" }}>{entrepreneur.name}</p>
           </div>
         </div>
-        <p style={{ fontSize: 10, color: "#888", marginTop: 80, textAlign: "center" }}>
-          Generated free via compliance.oshin-capital.com
+      </div>
+    </div>
+  );
+}
+
+// ==========================================================================
+// CMA / Working Capital — Inputs & on-screen Report
+// ==========================================================================
+const CMA_INK = "#152238", CMA_GOLD = "#AD8A34", CMA_GOLD_L = "#F3EBD6", CMA_LINE = "#DFDACB", CMA_TEXT = "#23262B", CMA_MUTED = "#6B6656";
+
+function cmaFmt(n) {
+  return (isFinite(n) ? n : 0).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+}
+function cmaPct(v) {
+  return v === null || !isFinite(v) ? "N/A" : `${v.toFixed(2)}%`;
+}
+function cmaRatio(v) {
+  return v === null || !isFinite(v) ? "N/A" : v.toFixed(2);
+}
+
+function CmaPeriodRow({ label, field, periods, onChange }) {
+  return (
+    <tr>
+      <td className="py-1 pr-3 text-sm" style={{ color: CMA_TEXT }}>{label}</td>
+      {periods.map((p, i) => (
+        <td key={i} className="py-1 px-1">
+          <input
+            type="number"
+            value={p[field]}
+            onChange={(e) => onChange(i, field, e.target.value === "" ? 0 : Number(e.target.value))}
+            onFocus={(e) => e.target.select()}
+            className="w-full bg-white border rounded px-2 py-1.5 text-sm focus:outline-none"
+            style={{ borderColor: CMA_LINE, fontFamily: "ui-monospace, monospace" }}
+          />
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+function CmaComputedRow({ label, values, formatter = cmaFmt, bold = false }) {
+  return (
+    <tr>
+      <td className="py-1.5 pr-3 text-sm" style={{ color: bold ? CMA_TEXT : CMA_MUTED, fontWeight: bold ? 600 : 400 }}>{label}</td>
+      {values.map((v, i) => (
+        <td key={i} className="py-1.5 px-3 text-sm text-right" style={{ fontFamily: "ui-monospace, monospace", fontWeight: bold ? 600 : 400 }}>
+          {formatter(v)}
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+function CmaSection({ title, children }) {
+  return (
+    <div style={{ background: "#fff", border: `1px solid ${CMA_LINE}`, borderRadius: 10 }} className="p-5 mb-5">
+      <h3 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-[15px] mb-3">{title}</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full" style={{ borderCollapse: "collapse" }}>
+          {children}
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CmaInputsAndReport({ tab, cmaEntrepreneur, setCmaEntrepreneur, cmaPeriodLabels, setCmaPeriodLabels, cmaPeriods, updateCmaPeriod, cmaCalc }) {
+  const inputCls = "w-full bg-white border rounded px-2 py-1.5 text-sm focus:outline-none";
+  const inputStyle = { borderColor: CMA_LINE };
+
+  const periodHeaderRow = (
+    <tr>
+      <th className="text-left pb-2 text-xs uppercase" style={{ color: CMA_MUTED }}>Particulars</th>
+      {cmaPeriodLabels.map((label, i) => (
+        <th key={i} className="pb-2 px-1" style={{ minWidth: 110 }}>
+          <input
+            className="w-full text-xs font-medium border-0 border-b bg-transparent focus:outline-none"
+            style={{ borderColor: CMA_LINE, color: CMA_TEXT }}
+            value={label}
+            onChange={(e) => setCmaPeriodLabels((labels) => labels.map((l, li) => (li === i ? e.target.value : l)))}
+          />
+        </th>
+      ))}
+    </tr>
+  );
+
+  if (tab === "inputs") {
+    return (
+      <div className="space-y-6 max-w-6xl">
+        <div style={{ background: CMA_GOLD_L, border: `1px solid ${CMA_LINE}`, borderRadius: 10 }} className="p-5">
+          <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-[15px] mb-2">
+            CMA / Working Capital Assessment
+          </h2>
+          <p className="text-sm" style={{ color: CMA_MUTED }}>
+            This assesses an <b>existing business's</b> working-capital limit across 5 periods (rename the columns
+            below to match your actual reporting years — e.g. last audited year, current provisional year, and
+            three years projected). It uses the same Nayak Committee (turnover method) and Tandon Committee (I & II)
+            methods banks use to assess cash-credit limits.
+          </p>
+        </div>
+
+        <div style={{ background: "#fff", border: `1px solid ${CMA_LINE}`, borderRadius: 10 }} className="p-5">
+          <h3 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-[15px] mb-3">Business details</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="block">
+              <span className="block text-xs mb-1" style={{ color: CMA_MUTED }}>Name of entrepreneur</span>
+              <input className={inputCls} style={inputStyle} value={cmaEntrepreneur.name} onChange={(e) => setCmaEntrepreneur({ ...cmaEntrepreneur, name: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="block text-xs mb-1" style={{ color: CMA_MUTED }}>Business / unit name</span>
+              <input className={inputCls} style={inputStyle} value={cmaEntrepreneur.business} onChange={(e) => setCmaEntrepreneur({ ...cmaEntrepreneur, business: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="block text-xs mb-1" style={{ color: CMA_MUTED }}>Address</span>
+              <input className={inputCls} style={inputStyle} value={cmaEntrepreneur.address} onChange={(e) => setCmaEntrepreneur({ ...cmaEntrepreneur, address: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="block text-xs mb-1" style={{ color: CMA_MUTED }}>Mobile</span>
+              <input className={inputCls} style={inputStyle} value={cmaEntrepreneur.mobile} onChange={(e) => setCmaEntrepreneur({ ...cmaEntrepreneur, mobile: e.target.value })} />
+            </label>
+            <label className="block">
+              <span className="block text-xs mb-1" style={{ color: CMA_MUTED }}>Email</span>
+              <input type="email" className={inputCls} style={inputStyle} value={cmaEntrepreneur.email} onChange={(e) => setCmaEntrepreneur({ ...cmaEntrepreneur, email: e.target.value })} />
+            </label>
+          </div>
+        </div>
+
+        <CmaSection title="Form II — Operating statement (income & expenses)">
+          <thead>{periodHeaderRow}</thead>
+          <tbody>
+            <CmaPeriodRow label="Domestic sales" field="domesticSales" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Export sales" field="exportSales" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other income" field="otherIncome" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Purchases (cost of goods)" field="purchases" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Opening stock" field="openingStock" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Closing stock" field="closingStock" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Selling, general & admin expenses" field="sgaExpenses" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Interest" field="interest" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Depreciation" field="depreciation" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other non-operating income" field="otherNonOpIncome" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other non-operating expense" field="otherNonOpExpense" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Provision for tax" field="taxProvision" periods={cmaPeriods} onChange={updateCmaPeriod} />
+          </tbody>
+        </CmaSection>
+
+        <CmaSection title="Form III — Current liabilities & term liabilities">
+          <thead>{periodHeaderRow}</thead>
+          <tbody>
+            <CmaPeriodRow label="Short term borrowings from bank" field="shortTermBorrowings" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Sundry creditors" field="sundryCreditors" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other current liabilities" field="otherCurrentLiabilities" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Term loans" field="termLoans" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other term liabilities" field="otherTermLiabilities" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Share capital (proprietor's capital account)" field="shareCapital" periods={cmaPeriods} onChange={updateCmaPeriod} />
+          </tbody>
+        </CmaSection>
+
+        <CmaSection title="Form III — Current assets & fixed assets">
+          <thead>{periodHeaderRow}</thead>
+          <tbody>
+            <CmaPeriodRow label="Cash & bank" field="cashAndBank" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Receivables" field="receivables" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Stock-in-trade" field="stockInTrade" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Other current assets" field="otherCurrentAssets" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Gross block (fixed assets at cost)" field="grossBlock" periods={cmaPeriods} onChange={updateCmaPeriod} />
+            <CmaPeriodRow label="Depreciation to date" field="depreciationToDate" periods={cmaPeriods} onChange={updateCmaPeriod} />
+          </tbody>
+        </CmaSection>
+      </div>
+    );
+  }
+
+  const p = cmaCalc.periods;
+  return (
+    <div className="max-w-6xl">
+      <CmaSection title="Form II — Operating statement">
+        <thead>{periodHeaderRow}</thead>
+        <tbody>
+          <CmaComputedRow label="Total income" values={p.map((x) => x.totalIncome)} bold />
+          <CmaComputedRow label="Cost of sales" values={p.map((x) => x.costOfSales)} />
+          <CmaComputedRow label="Gross profit" values={p.map((x) => x.grossProfit)} />
+          <CmaComputedRow label="Operating profit (EBITDA)" values={p.map((x) => x.ebitda)} bold />
+          <CmaComputedRow label="Profit before tax" values={p.map((x) => x.pbt)} />
+          <CmaComputedRow label="Net profit" values={p.map((x) => x.netProfit)} bold />
+        </tbody>
+      </CmaSection>
+
+      <CmaSection title="Form III — Balance sheet summary">
+        <thead>{periodHeaderRow}</thead>
+        <tbody>
+          <CmaComputedRow label="Total current liabilities" values={p.map((x) => x.totalCurrentLiabilities)} />
+          <CmaComputedRow label="Total term liabilities" values={p.map((x) => x.totalTermLiabilities)} />
+          <CmaComputedRow label="Total outside liabilities" values={p.map((x) => x.totalOutsideLiabilities)} />
+          <CmaComputedRow label="Net worth" values={p.map((x) => x.netWorth)} bold />
+          <CmaComputedRow label="Total current assets" values={p.map((x) => x.totalCurrentAssets)} />
+          <CmaComputedRow label="Net fixed assets" values={p.map((x) => x.netFixedAssets)} />
+          <CmaComputedRow label="Total assets" values={p.map((x) => x.totalAssets)} bold />
+          <CmaComputedRow label="Net working capital" values={p.map((x) => x.netWorkingCapital)} bold />
+          <CmaComputedRow label="Current ratio" values={p.map((x) => x.currentRatio)} formatter={cmaRatio} />
+          <CmaComputedRow label="TOL/TNW ratio" values={p.map((x) => x.tolTnwRatio)} formatter={cmaRatio} />
+        </tbody>
+      </CmaSection>
+
+      <CmaSection title="Form V — Bank finance for working capital (MPBF)">
+        <thead>{periodHeaderRow}</thead>
+        <tbody>
+          <CmaComputedRow label="MPBF — Turnover method (Nayak Committee)" values={p.map((x) => x.mpbfNayak)} bold />
+          <CmaComputedRow label="MPBF — Tandon First Method" values={p.map((x) => x.mpbfTandon1)} bold />
+          <CmaComputedRow label="MPBF — Tandon Second Method" values={p.map((x) => x.mpbfTandon2)} bold />
+        </tbody>
+      </CmaSection>
+
+      <CmaSection title="Miscellaneous ratios">
+        <thead>{periodHeaderRow}</thead>
+        <tbody>
+          <CmaComputedRow label="Gross profit ratio" values={p.map((x) => x.grossProfitRatio)} formatter={cmaPct} />
+          <CmaComputedRow label="Operating profit ratio" values={p.map((x) => x.operatingProfitRatio)} formatter={cmaPct} />
+          <CmaComputedRow label="Net profit ratio" values={p.map((x) => x.netProfitRatio)} formatter={cmaPct} />
+          <CmaComputedRow label="Interest coverage ratio" values={p.map((x) => x.interestCoverageRatio)} formatter={cmaRatio} />
+          <CmaComputedRow label="Quick ratio" values={p.map((x) => x.quickRatio)} formatter={cmaRatio} />
+          <CmaComputedRow label="Debt-equity ratio" values={p.map((x) => x.debtEquityRatio)} formatter={cmaRatio} />
+          <CmaComputedRow label="Capital turnover ratio" values={p.map((x) => x.capitalTurnoverRatio)} formatter={cmaRatio} />
+          <CmaComputedRow label="Return on capital employed" values={p.map((x) => x.returnOnCapitalEmployed)} formatter={cmaPct} />
+        </tbody>
+      </CmaSection>
+    </div>
+  );
+}
+
+// ==========================================================================
+// CMA — Printable PDF report
+// ==========================================================================
+function CmaPrintableReport({ entrepreneur, periodLabels, periods, calc }) {
+  const p = calc.periods;
+  return (
+    <div className="print-only">
+      <div className="print-page">
+        <h2 style={{ textAlign: "center", textDecoration: "underline", fontSize: 15 }}>
+          CMA / Working Capital Assessment
+        </h2>
+        <table className="print-table" style={{ marginTop: 14 }}>
+          <tbody>
+            <tr><td style={{ width: 140 }}>Name of entrepreneur</td><td><b>{entrepreneur.name}</b></td></tr>
+            <tr><td>Business / unit name</td><td>{entrepreneur.business}</td></tr>
+            <tr><td>Address</td><td>{entrepreneur.address}</td></tr>
+            <tr><td>Mobile</td><td>{entrepreneur.mobile}</td></tr>
+            <tr><td>Email</td><td>{entrepreneur.email}</td></tr>
+          </tbody>
+        </table>
+
+        <h3 style={{ fontSize: 13, marginTop: 16 }}>Form II — Operating Statement</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{periodLabels.map((l, i) => <th key={i}>{l}</th>)}</tr></thead>
+          <tbody>
+            <tr><td>Total income</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.totalIncome)}</b></td>)}</tr>
+            <tr><td>Cost of sales</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.costOfSales)}</td>)}</tr>
+            <tr><td>Gross profit</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.grossProfit)}</td>)}</tr>
+            <tr><td>Operating profit (EBITDA)</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.ebitda)}</b></td>)}</tr>
+            <tr><td>Interest</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(periods[i].interest)}</td>)}</tr>
+            <tr><td>Depreciation</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(periods[i].depreciation)}</td>)}</tr>
+            <tr><td>Profit before tax</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.pbt)}</td>)}</tr>
+            <tr><td><b>Net profit</b></td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.netProfit)}</b></td>)}</tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="print-page">
+        <h3 style={{ fontSize: 13 }}>Form III — Analysis of Balance Sheet</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{periodLabels.map((l, i) => <th key={i}>{l}</th>)}</tr></thead>
+          <tbody>
+            <tr><td colSpan={6}><b>Liabilities</b></td></tr>
+            <tr><td>Total current liabilities</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.totalCurrentLiabilities)}</td>)}</tr>
+            <tr><td>Total term liabilities</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.totalTermLiabilities)}</td>)}</tr>
+            <tr><td>Total outside liabilities</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.totalOutsideLiabilities)}</td>)}</tr>
+            <tr><td>Net worth</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.netWorth)}</b></td>)}</tr>
+            <tr><td><b>Total liabilities</b></td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.totalLiabilitiesBS)}</b></td>)}</tr>
+            <tr><td colSpan={6}><b>Assets</b></td></tr>
+            <tr><td>Total current assets</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.totalCurrentAssets)}</td>)}</tr>
+            <tr><td>Net fixed assets</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.netFixedAssets)}</td>)}</tr>
+            <tr><td><b>Total assets</b></td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.totalAssets)}</b></td>)}</tr>
+            <tr><td>Net working capital</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaFmt(x.netWorkingCapital)}</td>)}</tr>
+            <tr><td>Current ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.currentRatio)}</td>)}</tr>
+            <tr><td>TOL/TNW ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.tolTnwRatio)}</td>)}</tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="print-page">
+        <h3 style={{ fontSize: 13 }}>Form V — Bank Finance for Working Capital (MPBF)</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Method</th>{periodLabels.map((l, i) => <th key={i}>{l}</th>)}</tr></thead>
+          <tbody>
+            <tr><td>Turnover method (Nayak Committee)</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.mpbfNayak)}</b></td>)}</tr>
+            <tr><td>Tandon Committee — First Method</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.mpbfTandon1)}</b></td>)}</tr>
+            <tr><td>Tandon Committee — Second Method</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}><b>{cmaFmt(x.mpbfTandon2)}</b></td>)}</tr>
+          </tbody>
+        </table>
+
+        <h3 style={{ fontSize: 13, marginTop: 16 }}>Miscellaneous Ratios</h3>
+        <table className="print-table" style={{ marginTop: 6 }}>
+          <thead><tr><th>Particulars</th>{periodLabels.map((l, i) => <th key={i}>{l}</th>)}</tr></thead>
+          <tbody>
+            <tr><td>Gross profit ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaPct(x.grossProfitRatio)}</td>)}</tr>
+            <tr><td>Operating profit ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaPct(x.operatingProfitRatio)}</td>)}</tr>
+            <tr><td>Net profit ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaPct(x.netProfitRatio)}</td>)}</tr>
+            <tr><td>Interest coverage ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.interestCoverageRatio)}</td>)}</tr>
+            <tr><td>Quick ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.quickRatio)}</td>)}</tr>
+            <tr><td>Debt-equity ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.debtEquityRatio)}</td>)}</tr>
+            <tr><td>Capital turnover ratio</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaRatio(x.capitalTurnoverRatio)}</td>)}</tr>
+            <tr><td>Return on capital employed</td>{p.map((x, i) => <td key={i} style={{ textAlign: "right" }}>{cmaPct(x.returnOnCapitalEmployed)}</td>)}</tr>
+          </tbody>
+        </table>
+
+        <p style={{ fontSize: 10.5, marginTop: 30, color: "#666" }}>
+          This CMA data has been prepared based on the figures furnished by the applicant, using the Nayak Committee
+          (turnover method) and Tandon Committee (I &amp; II) methodologies for assessing working capital finance.
         </p>
       </div>
     </div>

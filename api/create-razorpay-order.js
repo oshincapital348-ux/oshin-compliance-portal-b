@@ -1,4 +1,5 @@
 import Razorpay from "razorpay";
+import { computeFee } from "./_lib/pricing.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -7,11 +8,18 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET." });
   }
 
-  // Same fee setting the free QR path uses — one place to change the price
-  // for both payment methods. REPORT_FEE_RUPEES is in whole rupees; Razorpay
-  // wants paise (rupees × 100).
-  const feeRupees = Number(process.env.REPORT_FEE_RUPEES) || 499;
+  // The fee is computed HERE, server-side, from the tier the customer's
+  // project cost falls into — never trust a fee amount sent from the
+  // browser. The client only tells us the project cost; we decide the price.
+  const projectCost = Number(req.body?.projectCost) || 0;
+  const feeRupees = computeFee(projectCost);
   const feePaise = Math.round(feeRupees * 100);
+
+  // Which report this payment is for ("dpr" | "cma"). Stored on the Razorpay
+  // order itself (authoritative, fetched fresh at verify time) so the access
+  // token minted after payment can be locked to this report type — a DPR
+  // payment can never be used to unlock a CMA download, or vice versa.
+  const reportType = req.body?.reportType === "cma" ? "cma" : "dpr";
 
   try {
     const razorpay = new Razorpay({
@@ -23,6 +31,7 @@ export default async function handler(req, res) {
       amount: feePaise,
       currency: "INR",
       receipt: `report_${Date.now()}`,
+      notes: { projectCost: String(projectCost), reportType },
     });
 
     res.status(200).json({
@@ -30,6 +39,7 @@ export default async function handler(req, res) {
       amount: order.amount,
       currency: order.currency,
       keyId: process.env.RAZORPAY_KEY_ID,
+      feeRupees,
     });
   } catch (err) {
     // Log the real Razorpay error server-side (visible via `vercel logs`)
