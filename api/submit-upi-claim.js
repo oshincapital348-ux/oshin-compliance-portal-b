@@ -1,4 +1,5 @@
 import { recordTransaction, notify } from "./_lib/store.js";
+import { sendAdminClaimAlert } from "./_lib/email.js";
 
 // A UPI claim is the customer SAYING they paid — not proof. It gets recorded
 // as "pending" (doesn't count toward the report total) and triggers a
@@ -14,6 +15,9 @@ export default async function handler(req, res) {
 
   await recordTransaction({ method: "upi-claim", utr, contact, amount: amount || null, status: "pending", reportType: cleanReportType });
   await notify({ event: "upi_claim_submitted", utr, contact, amount, reportType: cleanReportType });
+  // Best-effort — if this fails, the claim is still recorded and visible in
+  // the admin panel, it just means you have to notice it there instead.
+  await sendAdminClaimAlert({ utr, contact, amount, reportType: cleanReportType }).catch(() => {});
 
   res.status(200).json({ ok: true });
 }
