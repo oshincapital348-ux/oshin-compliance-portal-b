@@ -130,6 +130,25 @@ export default function App() {
       });
   }, []);
 
+  // A "quick approve" link from the admin alert email (?quickApprove=1&...)
+  // pre-fills the approval form so nothing needs retyping — it does NOT
+  // skip login or the click itself, that check stays in place on purpose.
+  const [quickApproveData, setQuickApproveData] = useState(null);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("quickApprove") !== "1") return;
+
+    setQuickApproveData({
+      utr: params.get("utr") || "",
+      contact: params.get("contact") || "",
+      amount: params.get("amount") || "",
+      reportType: params.get("reportType") === "cma" ? "cma" : "dpr",
+    });
+    setPayModalOpen(true);
+    // Scrub the claim details out of the visible URL / browser history right
+    // away — they've already been captured into state above.
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
 
 
   // Top-level: which kind of report is being generated. "dpr" is the
@@ -1350,6 +1369,7 @@ export default function App() {
               projectCost={reportType === "cma" ? (cmaCalc.periods[cmaCalc.periods.length - 1]?.totalSales || 0) : calc.totalProjectCost}
               onClose={() => { setPayModalOpen(false); setPendingDownload(null); }}
               onShowPricing={() => setShowPriceList(true)}
+              quickApproveData={quickApproveData}
               onUnlock={(mode, token, boundReportType) => {
                 handleUnlock(mode, token, boundReportType);
                 setPayModalOpen(false);
@@ -1457,8 +1477,8 @@ function PriceListModal({ onClose }) {
   );
 }
 
-function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing }) {
-  const [mode, setMode] = useState("choose"); // "choose" | "qr" | "admin"
+function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing, quickApproveData = null }) {
+  const [mode, setMode] = useState(quickApproveData ? "admin" : "choose"); // "choose" | "qr" | "admin"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -1468,10 +1488,10 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
 
   const [adminCode, setAdminCode] = useState("");
   const [adminToken, setAdminToken] = useState(null);
-  const [approveUtr, setApproveUtr] = useState("");
-  const [approveContact, setApproveContact] = useState("");
-  const [approveAmount, setApproveAmount] = useState("");
-  const [approveReportType, setApproveReportType] = useState("dpr"); // which report this link is good for
+  const [approveUtr, setApproveUtr] = useState(quickApproveData?.utr || "");
+  const [approveContact, setApproveContact] = useState(quickApproveData?.contact || "");
+  const [approveAmount, setApproveAmount] = useState(quickApproveData?.amount || "");
+  const [approveReportType, setApproveReportType] = useState(quickApproveData?.reportType || "dpr"); // which report this link is good for
   const [generatedLink, setGeneratedLink] = useState("");
   const [emailSent, setEmailSent] = useState(false);
   const [copied, setCopied] = useState(false);

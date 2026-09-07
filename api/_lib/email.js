@@ -72,6 +72,19 @@ export async function sendAdminClaimAlert({ utr, contact, amount, reportType }) 
   const from = process.env.RESEND_FROM_EMAIL || "Oshin Capital <support@oshin-capital.com>";
   const reportLabel = reportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)";
 
+  // Pre-fills the admin's approve form so there's nothing to retype — just
+  // check the bank app and click "Generate access link". This is NOT a
+  // one-click auto-approve: it still requires entering the admin code (if
+  // not already logged in) and a deliberate click, on purpose — that's the
+  // actual fraud check, and it stays in place no matter how convenient the
+  // rest of the flow gets.
+  const quickApproveUrl =
+    `https://compliance.oshin-capital.com/?quickApprove=1` +
+    `&utr=${encodeURIComponent(utr)}` +
+    `&contact=${encodeURIComponent(contact)}` +
+    `&amount=${encodeURIComponent(amount || "")}` +
+    `&reportType=${encodeURIComponent(reportType)}`;
+
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -93,7 +106,12 @@ export async function sendAdminClaimAlert({ utr, contact, amount, reportType }) 
               <tr><td style="padding:6px 0; color:#666;">UTR</td><td style="padding:6px 0; font-weight:bold;">${utr}</td></tr>
               <tr><td style="padding:6px 0; color:#666;">Amount claimed</td><td style="padding:6px 0; font-weight:bold;">₹${amount || "—"}</td></tr>
             </table>
-            <p><a href="https://compliance.oshin-capital.com" style="background:#c9a24b;color:#1a1a1a;padding:10px 18px;text-decoration:none;border-radius:4px;font-weight:bold;display:inline-block;">Open admin panel</a></p>
+            <p>
+              <a href="${quickApproveUrl}" style="background:#c9a24b;color:#1a1a1a;padding:10px 18px;text-decoration:none;border-radius:4px;font-weight:bold;display:inline-block;">
+                Approve this payment
+              </a>
+            </p>
+            <p style="font-size: 12px; color: #999; margin-top: 8px;">Takes you straight to a pre-filled approval form — you'll still need your admin code and one click.</p>
           </div>
         `,
       }),
