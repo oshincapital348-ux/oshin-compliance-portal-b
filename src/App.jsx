@@ -29,6 +29,17 @@ function emptyLine(extra = {}) {
 export default function App() {
   const [tab, setTab] = useState("inputs");
   const [showPriceList, setShowPriceList] = useState(false);
+  // In-app browsers (opened from Gmail/WhatsApp/Instagram/Facebook links
+  // instead of a real browser) frequently strip out the native print
+  // dialog, so "Download report (PDF)" — which relies on window.print() —
+  // can silently do nothing there. Detect it and point people to the real
+  // browser instead of leaving them stuck with no explanation.
+  const [inAppBrowser, setInAppBrowser] = useState(false);
+  useEffect(() => {
+    const ua = navigator.userAgent || "";
+    const isInApp = /FBAN|FBAV|Instagram|Line\/|GSA\/|; wv\)|WhatsApp/i.test(ua) || (/\bGmail\b/i.test(ua) && /Android/i.test(ua));
+    setInAppBrowser(isInApp);
+  }, []);
   const [showGuide, setShowGuide] = useState(() => {
     try {
       return localStorage.getItem("oshinGuideDismissed") !== "1";
@@ -1032,6 +1043,17 @@ export default function App() {
           </div>
         )}
 
+        {inAppBrowser && (
+          <div
+            className="mt-4 px-4 py-3 rounded text-sm no-print"
+            style={{ background: "#4a3a1f", color: "#ffe9c2", border: "1px solid #ad8a34" }}
+          >
+            You're viewing this inside another app's built-in browser (like Gmail or WhatsApp), which often blocks PDF downloads.
+            For the smoothest experience, tap your device's menu (usually ⋮ or a share icon) and choose{" "}
+            <b>"Open in Chrome"</b> or <b>"Open in Safari"</b>, then come back to download your report from there.
+          </div>
+        )}
+
         {downloadBlocked && (
           <div
             className="mt-4 px-4 py-3 rounded text-sm no-print"
@@ -1148,7 +1170,7 @@ export default function App() {
                   <li>Add your raw materials, staff wages, and running expenses (rent, power, etc.).</li>
                   <li>Fill in a few final details — employment, place, and report date.</li>
                   <li>Switch to the <b>Generated report</b> tab above to preview everything.</li>
-                  <li>Click <b>Download report</b> to get your PDF or Excel file — bank-ready.</li>
+                  <li>Click <b>Download report</b> to get your PDF or Excel file — bank-ready. The Excel button downloads directly. The PDF button opens your device's print screen — choose <b>"Save as PDF"</b> as the destination/printer, then save. On phone, this is usually under a printer icon or a dropdown in the print preview.</li>
                 </ol>
                 <p className="text-xs mt-3" style={{ color: MUTED }}>
                   Tip: figures marked "at 100% capacity" mean your maximum yearly output if running at full scale — the tool automatically scales this down for each year using the capacity percentages you set.
