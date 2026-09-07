@@ -28,6 +28,7 @@ function emptyLine(extra = {}) {
 
 export default function App() {
   const [tab, setTab] = useState("inputs");
+  const [showPriceList, setShowPriceList] = useState(false);
   const [showGuide, setShowGuide] = useState(() => {
     try {
       return localStorage.getItem("oshinGuideDismissed") !== "1";
@@ -922,6 +923,14 @@ export default function App() {
           </div>
           <div className="flex gap-2">
             <button
+              onClick={() => setShowPriceList(true)}
+              className="flex items-center gap-2 px-3 py-2 rounded-full text-sm font-bold border"
+              style={{ borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
+              title="See our full price list"
+            >
+              Pricing
+            </button>
+            <button
               onClick={() => { setTab("inputs"); setShowGuide(true); try { localStorage.removeItem("oshinGuideDismissed"); } catch {} }}
               className="flex items-center gap-2 px-3 py-2 rounded-full text-sm font-bold border"
               style={{ borderColor: "rgba(255,255,255,0.3)", color: "#fff" }}
@@ -1327,6 +1336,8 @@ export default function App() {
 
       )}
 
+      {showPriceList && <PriceListModal onClose={() => setShowPriceList(false)} />}
+
       {payModalOpen && (
         <div
           className="fixed inset-0 flex items-center justify-center p-4 no-print"
@@ -1338,6 +1349,7 @@ export default function App() {
               reportType={reportType}
               projectCost={reportType === "cma" ? (cmaCalc.periods[cmaCalc.periods.length - 1]?.totalSales || 0) : calc.totalProjectCost}
               onClose={() => { setPayModalOpen(false); setPendingDownload(null); }}
+              onShowPricing={() => setShowPriceList(true)}
               onUnlock={(mode, token, boundReportType) => {
                 handleUnlock(mode, token, boundReportType);
                 setPayModalOpen(false);
@@ -1368,7 +1380,84 @@ export default function App() {
   );
 }
 
-function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr" }) {
+// Shows the exact same tiers computeFee() uses server-side (fetched fresh
+// from /api/get-price-list, not hardcoded here) — so this can never show a
+// customer a price different from what they're actually charged, even if
+// PRICING_TIERS changes later.
+function PriceListModal({ onClose }) {
+  const [tiers, setTiers] = useState(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/get-price-list")
+      .then((r) => r.json())
+      .then((data) => setTiers(Array.isArray(data.tiers) ? data.tiers : []))
+      .catch(() => setError(true));
+  }, []);
+
+  const formatAmt = (rupees) => {
+    if (rupees >= 10000000) {
+      const cr = rupees / 10000000;
+      return `₹${Number.isInteger(cr) ? cr : cr.toFixed(2)} Cr`;
+    }
+    if (rupees >= 100000) {
+      const lac = rupees / 100000;
+      return `₹${Number.isInteger(lac) ? lac : lac.toFixed(2)} Lacs`;
+    }
+    return `₹${rupees.toLocaleString("en-IN")}`;
+  };
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center p-4 z-50 no-print" style={{ background: "rgba(15,15,20,0.55)" }}>
+      <div className="rounded-lg p-6 w-full max-w-lg relative" style={{ background: "#fff" }}>
+        <button onClick={onClose} className="absolute top-4 right-4 text-lg" style={{ color: MUTED }} aria-label="Close">
+          ×
+        </button>
+        <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-xl mb-1">
+          Price list
+        </h2>
+        <p className="text-sm mb-4" style={{ color: MUTED }}>
+          Same pricing for both the Project Report (DPR) and CMA / Working Capital reports — based on your total project cost (or turnover, for CMA).
+        </p>
+
+        {error && <p className="text-sm" style={{ color: MUTED }}>Couldn't load pricing right now — please try again in a moment.</p>}
+        {!tiers && !error && <p className="text-sm" style={{ color: MUTED }}>Loading…</p>}
+
+        {tiers && tiers.length > 0 && (
+          <div className="border rounded overflow-hidden" style={{ borderColor: LINE }}>
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background: GOLD_L }}>
+                  <th className="text-left py-2 px-3" style={{ color: MUTED }}>S.No.</th>
+                  <th className="text-left py-2 px-3" style={{ color: MUTED }}>Project cost range</th>
+                  <th className="text-right py-2 px-3" style={{ color: MUTED }}>Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tiers.map((t, i) => (
+                  <tr key={t.maxCost} style={{ borderTop: `1px solid ${LINE}` }}>
+                    <td className="py-2 px-3" style={{ color: MUTED }}>{i + 1}</td>
+                    <td className="py-2 px-3">
+                      {i === 0 ? `Up to ${formatAmt(t.maxCost)}` : `${formatAmt(tiers[i - 1].maxCost)} – ${formatAmt(t.maxCost)}`}
+                    </td>
+                    <td className="py-2 px-3 text-right font-medium">₹{t.fee.toLocaleString("en-IN")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <p className="text-xs mt-4" style={{ color: MUTED }}>
+          Questions? Email <a href="mailto:support@oshin-capital.com" style={{ color: INK, textDecoration: "underline" }}>support@oshin-capital.com</a> or WhatsApp{" "}
+          <a href="https://wa.me/919503945982" target="_blank" rel="noreferrer" style={{ color: INK, textDecoration: "underline" }}>+91 95039 45982</a>.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing }) {
   const [mode, setMode] = useState("choose"); // "choose" | "qr" | "admin"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1597,7 +1686,10 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr" }) {
             "Calculating your fee based on project size…"
           ) : fee !== null ? (
             <>
-              Based on your figures, the report-generation fee is <b style={{ color: TEXT }}>₹{fee}</b>.
+              Based on your figures, the report-generation fee is <b style={{ color: TEXT }}>₹{fee}</b>.{" "}
+              <button onClick={onShowPricing} className="underline" style={{ color: INK }}>
+                See full price list
+              </button>
             </>
           ) : (
             "A report-generation fee applies, based on your project size."
