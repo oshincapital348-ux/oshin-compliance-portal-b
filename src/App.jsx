@@ -64,6 +64,7 @@ export default function App() {
   // ---------------------------------------------------------------------
   const [access, setAccess] = useState("locked"); // "locked" | "paid" | "admin"
   const [accessToken, setAccessToken] = useState(null);
+  const [linkError, setLinkError] = useState(null);
   // Which report a "paid" session was actually paid for ("dpr" | "cma" | null).
   // A payment made for one report type must never unlock the other — this is
   // the client-side half of that guarantee; the server enforces it for real
@@ -130,7 +131,22 @@ export default function App() {
           // straight to it, instead of leaving the customer on the wrong
           // tab wondering why the toggle won't let them download.
           if (mode === "paid" && data.reportType) setReportType(data.reportType);
-        } else localStorage.removeItem("oshinAccess"); // stale/expired — clear it
+        } else {
+          localStorage.removeItem("oshinAccess"); // stale/expired — clear it
+          // Only show an explanation if a link was actually clicked (not
+          // just a saved-but-expired session from an earlier visit) — that
+          // was the exact confusion here: a customer's inbox had two
+          // report-ready emails, an older already-used one and a fresh one,
+          // and tapping the wrong one silently showed the payment screen
+          // with no explanation of why.
+          if (linkToken) {
+            setLinkError(
+              data.reason === "already-used"
+                ? "This link has already been used to generate a report. If you have a newer email from us, use that link instead — otherwise contact support for a new one."
+                : "This link has expired or isn't valid anymore. If you have a more recent email from us, use that link instead — otherwise contact support for a new one."
+            );
+          }
+        }
       })
       .catch(() => {})
       .finally(() => {
@@ -1040,6 +1056,18 @@ export default function App() {
                 {label.short}
               </button>
             ))}
+          </div>
+        )}
+
+        {linkError && (
+          <div
+            className="mt-4 px-4 py-3 rounded text-sm no-print"
+            style={{ background: "#4a1f1f", color: "#ffd6d6", border: "1px solid #B3261E" }}
+          >
+            {linkError}{" "}
+            <button onClick={() => setLinkError(null)} className="underline font-medium">
+              Dismiss
+            </button>
           </div>
         )}
 
