@@ -2022,9 +2022,9 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
                     {stats.recent.length === 0 && <p className="text-xs" style={{ color: MUTED }}>No activity yet.</p>}
                     {stats.recent.map((r, i) => (
                       <div key={i} className="text-xs p-2 rounded" style={{ background: "#fafafa", border: `1px solid ${LINE}` }}>
-                        <span className="font-medium">{r.method}</span>
+                        <span className="font-medium">{r.method === "repeat-discount" ? "Free (repeat-customer discount)" : r.method}</span>
                         {r.reportType && <span> &middot; {r.reportType === "cma" ? "CMA" : "DPR"}</span>}
-                        {r.amount && <span> &middot; ₹{r.amount}</span>}
+                        {r.amount ? <span> &middot; ₹{r.amount}</span> : r.method === "repeat-discount" ? <span> &middot; ₹0</span> : null}
                         {r.status === "pending" && <span style={{ color: "#B3261E" }}> &middot; pending</span>}
                         <span style={{ color: MUTED }}> &middot; {new Date(r.at).toLocaleString()}</span>
                         {r.contact && <div style={{ color: MUTED }}>{r.contact}</div>}
