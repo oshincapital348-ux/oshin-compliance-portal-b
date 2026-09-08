@@ -1,5 +1,6 @@
 import Razorpay from "razorpay";
-import { computeFee } from "./_lib/pricing.js";
+import { computeFee, applyRepeatDiscount } from "./_lib/pricing.js";
+import { getContactPaidHistory } from "./_lib/store.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -12,14 +13,16 @@ export default async function handler(req, res) {
   // project cost falls into — never trust a fee amount sent from the
   // browser. The client only tells us the project cost; we decide the price.
   const projectCost = Number(req.body?.projectCost) || 0;
-  const feeRupees = computeFee(projectCost);
-  const feePaise = Math.round(feeRupees * 100);
-
-  // Which report this payment is for ("dpr" | "cma"). Stored on the Razorpay
-  // order itself (authoritative, fetched fresh at verify time) so the access
-  // token minted after payment can be locked to this report type — a DPR
-  // payment can never be used to unlock a CMA download, or vice versa.
   const reportType = req.body?.reportType === "cma" ? "cma" : "dpr";
+  const contact = typeof req.body?.contact === "string" ? req.body.contact : "";
+
+  // A customer who already paid for the other report type on this contact
+  // gets the difference credited — computed server-side from real payment
+  // history, never trusted from the browser, same principle as the tier fee.
+  const normalFee = computeFee(projectCost);
+  const history = contact ? await getContactPaidHistory(contact) : null;
+  const { fee: feeRupees } = applyRepeatDiscount(normalFee, reportType, history);
+  const feePaise = Math.round(feeRupees * 100);
 
   try {
     const razorpay = new Razorpay({
@@ -31,7 +34,7 @@ export default async function handler(req, res) {
       amount: feePaise,
       currency: "INR",
       receipt: `report_${Date.now()}`,
-      notes: { projectCost: String(projectCost), reportType },
+      notes: { projectCost: String(projectCost), reportType, contact: contact || "" },
     });
 
     res.status(200).json({

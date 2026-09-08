@@ -1,5 +1,5 @@
 import { verifyAccessToken, signAccessToken } from "./_lib/token.js";
-import { recordTransaction, notify } from "./_lib/store.js";
+import { recordTransaction, notify, recordContactPaid } from "./_lib/store.js";
 import { sendAccessLinkEmail } from "./_lib/email.js";
 
 // Only someone holding a valid admin token (issued by /api/verify-admin,
@@ -45,6 +45,7 @@ export default async function handler(req, res) {
   }
 
   await recordTransaction({ method: "upi-approved", contact, utr, amount: amount || null, status: "completed", reportType: cleanReportType });
+  await recordContactPaid(contact, cleanReportType, amount);
   await notify({
     event: "upi_payment_approved",
     contact,

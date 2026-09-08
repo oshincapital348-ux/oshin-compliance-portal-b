@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import Razorpay from "razorpay";
 import { signAccessToken } from "./_lib/token.js";
-import { recordTransaction, notify } from "./_lib/store.js";
+import { recordTransaction, notify, recordContactPaid } from "./_lib/store.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -30,6 +30,7 @@ export default async function handler(req, res) {
   let amountRupees = null;
   let projectCost = null;
   let reportType = "dpr";
+  let contact = "";
   try {
     const razorpay = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
@@ -39,6 +40,7 @@ export default async function handler(req, res) {
     amountRupees = order.amount / 100;
     projectCost = order.notes?.projectCost || null;
     reportType = order.notes?.reportType === "cma" ? "cma" : "dpr";
+    contact = order.notes?.contact || "";
   } catch (err) {
     console.error("Could not fetch order for amount record:", err);
   }
@@ -55,6 +57,7 @@ export default async function handler(req, res) {
   });
 
   await recordTransaction({ method: "razorpay", utr: razorpay_payment_id, amount: amountRupees, status: "completed", reportType });
+  await recordContactPaid(contact, reportType, amountRupees);
   await notify({
     event: "payment_completed",
     method: "razorpay",

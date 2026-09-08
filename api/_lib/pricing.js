@@ -29,3 +29,27 @@ export function computeFee(projectCost) {
   }
   return tiers[tiers.length - 1].fee; // above the highest bracket — use the top tier's fee
 }
+
+// A customer who already paid for DPR shouldn't pay full price again for
+// CMA on the same project (or vice versa) — they only pay the difference
+// if the new report's tier costs more, and nothing if it costs the same
+// or less. `contactHistory` comes from getContactPaidHistory() in store.js;
+// pass null/undefined if there's no history or no contact was given.
+export function applyRepeatDiscount(normalFee, reportType, contactHistory) {
+  const otherType = reportType === "cma" ? "dpr" : "cma";
+  const otherPaid = contactHistory?.[otherType];
+
+  if (!otherPaid || !Number.isFinite(otherPaid.amount)) {
+    return { fee: normalFee, discount: null };
+  }
+
+  const fee = Math.max(0, Math.round(normalFee - otherPaid.amount));
+  return {
+    fee,
+    discount: {
+      otherReportType: otherType,
+      otherAmountPaid: otherPaid.amount,
+      savedAmount: normalFee - fee,
+    },
+  };
+}

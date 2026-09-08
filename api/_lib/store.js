@@ -111,3 +111,48 @@ export async function markConsumed(tokenHash, ttlSeconds) {
     console.error("Failed to mark token consumed:", err);
   }
 }
+
+// How long a payment counts toward the "don't charge the same customer
+// twice" discount on the OTHER report type. 15 days — enough to cover the
+// realistic gap between getting one report done and a bank asking for the
+// other on the same project shortly after, without becoming an indefinite
+// freebie for an unrelated purchase much later.
+const CONTACT_DISCOUNT_WINDOW_SECONDS = 15 * 24 * 60 * 60;
+
+function normalizeContact(contact) {
+  return typeof contact === "string" ? contact.trim().toLowerCase() : "";
+}
+
+// Records that this contact paid `amount` for `reportType`, so if they come
+// back for the OTHER report type within the window, they're only charged
+// the difference (or nothing, if the new tier costs the same or less) —
+// never full price twice for the same underlying project.
+export async function recordContactPaid(contact, reportType, amount) {
+  const normalized = normalizeContact(contact);
+  if (!redis || !normalized || !amount) return; // no contact or no real amount — nothing to credit
+  const key = `oshin:contactPaid:${normalized}`;
+  try {
+    const existingRaw = await redis.get(key);
+    const existing = existingRaw ? (typeof existingRaw === "string" ? JSON.parse(existingRaw) : existingRaw) : {};
+    existing[reportType] = { amount: Number(amount), at: new Date().toISOString() };
+    await redis.set(key, JSON.stringify(existing), { ex: CONTACT_DISCOUNT_WINDOW_SECONDS });
+  } catch (err) {
+    console.error("Failed to record contact payment history:", err);
+  }
+}
+
+// Looks up what this contact has already paid, if anything, for either
+// report type — used to compute a repeat-customer discount before showing
+// a price. Returns null if there's no history or storage isn't configured.
+export async function getContactPaidHistory(contact) {
+  const normalized = normalizeContact(contact);
+  if (!redis || !normalized) return null;
+  try {
+    const raw = await redis.get(`oshin:contactPaid:${normalized}`);
+    if (!raw) return null;
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (err) {
+    console.error("Failed to read contact payment history:", err);
+    return null;
+  }
+}

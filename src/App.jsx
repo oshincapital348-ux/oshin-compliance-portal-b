@@ -1417,6 +1417,7 @@ export default function App() {
             <PayGate
               reportType={reportType}
               projectCost={reportType === "cma" ? (cmaCalc.periods[cmaCalc.periods.length - 1]?.totalSales || 0) : calc.totalProjectCost}
+              customerContact={(reportType === "cma" ? (cmaEntrepreneur.email || cmaEntrepreneur.mobile) : (entrepreneur.email || entrepreneur.mobile)) || ""}
               onClose={() => { setPayModalOpen(false); setPendingDownload(null); }}
               onShowPricing={() => setShowPriceList(true)}
               quickApproveData={quickApproveData}
@@ -1488,6 +1489,7 @@ function PriceListModal({ onClose }) {
         </h2>
         <p className="text-sm mb-4" style={{ color: MUTED }}>
           Same pricing for both the Project Report (DPR) and CMA / Working Capital reports — based on your total project cost (or turnover, for CMA).
+          Already paid for one? You'll only pay the difference (or nothing) for the other, using the same email or mobile number.
         </p>
 
         {error && <p className="text-sm" style={{ color: MUTED }}>Couldn't load pricing right now — please try again in a moment.</p>}
@@ -1527,7 +1529,7 @@ function PriceListModal({ onClose }) {
   );
 }
 
-function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing, quickApproveData = null }) {
+function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing, quickApproveData = null, customerContact = "" }) {
   const [mode, setMode] = useState(quickApproveData ? "admin" : "choose"); // "choose" | "qr" | "admin"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1556,21 +1558,27 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
   // displayed here always matches what actually gets charged.
   const [fee, setFee] = useState(null);
   const [feeLoading, setFeeLoading] = useState(true);
+  // If this contact already paid for the OTHER report type recently, the
+  // difference gets credited automatically — never charge the same
+  // customer full price twice for the two halves of one bank submission.
+  const [discount, setDiscount] = useState(null);
   // Whether Razorpay is actually able to take real payments right now
   // (false while your account's website review is pending, or if test
   // keys are still in place) — drives whether "Pay online" is shown at all.
   const [razorpayLive, setRazorpayLive] = useState(true);
   useEffect(() => {
     setFeeLoading(true);
-    fetch(`/api/get-fee?projectCost=${encodeURIComponent(projectCost)}`)
+    const params = new URLSearchParams({ projectCost, reportType, contact: customerContact || "" });
+    fetch(`/api/get-fee?${params}`)
       .then((r) => r.json())
       .then((data) => {
         setFee(data.fee);
+        setDiscount(data.discount || null);
         setRazorpayLive(Boolean(data.razorpayLive));
       })
       .catch(() => setFee(null))
       .finally(() => setFeeLoading(false));
-  }, [projectCost]);
+  }, [projectCost, reportType, customerContact]);
 
   // ---- Razorpay: opens in this same window, verifies server-side via
   // signature, and unlocks the software immediately on success — no link
@@ -1583,7 +1591,7 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
       const orderRes = await fetch("/api/create-razorpay-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectCost, reportType }),
+        body: JSON.stringify({ projectCost, reportType, contact: customerContact || "" }),
       });
       if (!orderRes.ok) throw new Error("Could not start payment. Please try again.");
       const order = await orderRes.json();
@@ -1628,12 +1636,36 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
   // or how much is charged. The QR image is generated client-side from a
   // standard UPI deep link — no gateway, no per-transaction fee, but
   // requires the admin to manually approve (see admin panel). ----
+  // Fee fully covered by a repeat-customer discount — nothing to actually
+  // charge, so skip Razorpay/QR entirely and mint access directly. The
+  // server recomputes the discount independently; it never trusts fee===0
+  // just because the browser says so.
+  const claimFreeReport = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/claim-free-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectCost, reportType, contact: customerContact || "" }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Could not claim this report.");
+      onUnlock("paid", data.accessToken, data.reportType);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const openQr = async () => {
     setMode("qr");
     setBusy(true);
     setError("");
     try {
-      const res = await fetch(`/api/get-payment-details?projectCost=${encodeURIComponent(projectCost)}`);
+      const params = new URLSearchParams({ projectCost, reportType, contact: customerContact || "" });
+      const res = await fetch(`/api/get-payment-details?${params}`);
       if (!res.ok) throw new Error("Could not load payment details.");
       const { upiId, amount, payeeName } = await res.json();
 
@@ -1751,7 +1783,7 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
         <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-xl mb-3">
           Generate your project report
         </h2>
-        <p className="text-sm mb-6" style={{ color: MUTED }}>
+        <p className="text-sm mb-2" style={{ color: MUTED }}>
           {feeLoading ? (
             "Calculating your fee based on project size…"
           ) : fee !== null ? (
@@ -1766,23 +1798,39 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
           )}
         </p>
 
+        {discount && (
+          <p className="text-xs mb-6 px-3 py-2 rounded" style={{ background: GOLD_L, color: TEXT }}>
+            ✓ You've already paid ₹{discount.otherAmountPaid} for your {discount.otherReportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)"} —
+            we've credited that, saving you ₹{discount.savedAmount} on this report.
+          </p>
+        )}
+        {!discount && <div className="mb-6" />}
+
         {error && <p className="text-xs mb-4" style={{ color: "#B3261E" }}>{error}</p>}
 
         {mode === "choose" && (
           <div className="space-y-2">
-            {razorpayLive ? (
-              <button onClick={payWithRazorpay} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>
-                {busy ? "Opening payment…" : `Pay online${fee !== null ? ` ₹${fee}` : ""} — instant access`}
+            {!feeLoading && fee === 0 ? (
+              <button onClick={claimFreeReport} disabled={busy} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>
+                {busy ? "Unlocking…" : "Get your report — fully covered, ₹0"}
               </button>
             ) : (
-              <p className="text-xs px-1 pb-1" style={{ color: MUTED }}>
-                Instant card/online payment is temporarily unavailable while our payment provider finishes account
-                verification. Please use the QR code below in the meantime — it works right now.
-              </p>
+              <>
+                {razorpayLive ? (
+                  <button onClick={payWithRazorpay} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>
+                    {busy ? "Opening payment…" : `Pay online${fee !== null ? ` ₹${fee}` : ""} — instant access`}
+                  </button>
+                ) : (
+                  <p className="text-xs px-1 pb-1" style={{ color: MUTED }}>
+                    Instant card/online payment is temporarily unavailable while our payment provider finishes account
+                    verification. Please use the QR code below in the meantime — it works right now.
+                  </p>
+                )}
+                <button onClick={openQr} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium border" style={{ borderColor: LINE, color: TEXT }}>
+                  {busy ? "Loading…" : "Scan QR to pay (UPI, no gateway fee)"}
+                </button>
+              </>
             )}
-            <button onClick={openQr} disabled={busy || feeLoading} className="w-full py-2.5 rounded text-sm font-medium border" style={{ borderColor: LINE, color: TEXT }}>
-              {busy ? "Loading…" : "Scan QR to pay (UPI, no gateway fee)"}
-            </button>
             <button onClick={() => setMode("admin")} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>
               Super admin access
             </button>
