@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { Plus, Trash2, Download, FileText, Building2, Landmark, ClipboardList, TrendingUp, ShieldCheck } from "lucide-react";
 
@@ -940,50 +940,6 @@ export default function App() {
   const introText = narrative.introduction || defaultIntro(entrepreneur.business, products);
   const aboutText = narrative.aboutPromoter || defaultAbout(entrepreneur.name, entrepreneur.business);
 
-  // Applies what the chat assistant proposed — only ever called after the
-  // customer clicks "Apply" on the review card, never automatically. This
-  // is DPR-only for now (the CMA multi-period model is a different shape
-  // the assistant doesn't currently propose into).
-  const applyFormUpdates = (u) => {
-    if (!u) return;
-    if (u.entrepreneur) setEntrepreneur((prev) => ({ ...prev, ...u.entrepreneur }));
-    if (u.capex) setCapex((prev) => ({ ...prev, ...u.capex }));
-    if (u.addMachinery?.length) setMachinery((prev) => [...prev, ...u.addMachinery.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
-    if (u.finance) setFinance((prev) => ({ ...prev, ...u.finance }));
-    if (u.addProducts?.length) setProducts((prev) => [...prev, ...u.addProducts.map((p) => ({ id: uid(), name: p.name || "", qty: Number(p.qty) || 0, rate: Number(p.rate) || 0 }))]);
-    if (Array.isArray(u.capacityUtil) && u.capacityUtil.length === 5) setCapacityUtil(u.capacityUtil.map((n) => Number(n) || 0));
-    if (u.addRawMaterials?.length) setRawMaterials((prev) => [...prev, ...u.addRawMaterials.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
-    if (u.addWages?.length) setWages((prev) => [...prev, ...u.addWages.map((w) => ({ id: uid(), name: w.name || "", workers: Number(w.workers) || 0, perMonth: Number(w.perMonth) || 0 }))]);
-    if (u.opex) setOpex((prev) => ({ ...prev, ...u.opex }));
-    if (u.admin) setAdmin((prev) => ({ ...prev, ...u.admin }));
-    if (u.depRate != null) setDepRate(Number(u.depRate) || 10);
-    if (u.details) setDetails((prev) => ({ ...prev, ...u.details }));
-    if (u.narrative) setNarrative((prev) => ({ ...prev, ...u.narrative }));
-  };
-
-  // A compact snapshot of what's already filled in, sent to the assistant
-  // so it doesn't re-ask about fields the customer already answered. Kept
-  // to just values (no internal row IDs) to save tokens.
-  const chatFormSnapshot =
-    reportType === "cma"
-      ? { reportType: "cma", entrepreneur: cmaEntrepreneur, note: "CMA form — this assistant can currently explain CMA fields but can only auto-fill the DPR form." }
-      : {
-          reportType: "dpr",
-          scheme,
-          entrepreneur,
-          capex,
-          machinery: machinery.filter((m) => m.name),
-          finance,
-          products: products.filter((p) => p.name),
-          capacityUtil,
-          rawMaterials: rawMaterials.filter((m) => m.name),
-          wages: wages.filter((w) => w.name),
-          opex,
-          admin,
-          depRate,
-          details,
-        };
-
   const inputCls =
     "w-full bg-white border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1";
   const inputStyle = { borderColor: LINE };
@@ -1451,8 +1407,6 @@ export default function App() {
 
       {showPriceList && <PriceListModal onClose={() => setShowPriceList(false)} />}
 
-      <ChatWidget reportType={reportType} formSnapshot={chatFormSnapshot} onApplyUpdates={applyFormUpdates} />
-
       {payModalOpen && (
         <div
           className="fixed inset-0 flex items-center justify-center p-4 no-print"
@@ -1496,148 +1450,6 @@ export default function App() {
     </div>
   );
 }
-
-// The customer-facing help assistant. Talks through what fields mean, can
-// search the web for current facts, and can propose form values — but only
-// EVER applies them after the customer explicitly clicks "Apply". Nothing
-// here silently touches the report.
-function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
-  const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState([]); // [{role, content}]
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [pendingUpdates, setPendingUpdates] = useState(null);
-  const scrollRef = useRef(null);
-
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, pendingUpdates, busy]);
-
-  const send = async () => {
-    const text = input.trim();
-    if (!text || busy) return;
-    const nextMessages = [...messages, { role: "user", content: text }];
-    setMessages(nextMessages);
-    setInput("");
-    setBusy(true);
-    setError("");
-    setPendingUpdates(null);
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, reportType, formSnapshot }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Something went wrong.");
-      setMessages((m) => [...m, { role: "assistant", content: data.reply || "…" }]);
-      if (data.proposedUpdates && Object.keys(data.proposedUpdates).length > 0) {
-        setPendingUpdates(data.proposedUpdates);
-      }
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const applyUpdates = () => {
-    onApplyUpdates(pendingUpdates);
-    setPendingUpdates(null);
-    setMessages((m) => [...m, { role: "user", content: "(Applied those to the form)" }]);
-  };
-
-  // Human-readable one-line summary of what's being proposed, for the
-  // review card — not every field, just enough to recognize it at a glance.
-  const summarizeUpdates = (u) => {
-    const parts = [];
-    if (u.entrepreneur) parts.push(`business details`);
-    if (u.capex) parts.push(`project cost fields`);
-    if (u.addMachinery?.length) parts.push(`${u.addMachinery.length} machinery item(s)`);
-    if (u.finance) parts.push(`loan terms`);
-    if (u.addProducts?.length) parts.push(`${u.addProducts.length} product(s)`);
-    if (u.capacityUtil) parts.push(`capacity utilization`);
-    if (u.addRawMaterials?.length) parts.push(`${u.addRawMaterials.length} raw material(s)`);
-    if (u.addWages?.length) parts.push(`${u.addWages.length} wage role(s)`);
-    if (u.opex) parts.push(`manufacturing expenses`);
-    if (u.admin) parts.push(`admin expenses`);
-    if (u.depRate != null) parts.push(`depreciation rate`);
-    if (u.details) parts.push(`report details`);
-    if (u.narrative) parts.push(`report text`);
-    return parts.join(", ") || "some fields";
-  };
-
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        className="fixed bottom-5 right-5 rounded-full shadow-lg px-4 py-3 text-sm font-medium no-print"
-        style={{ background: GOLD, color: INK, zIndex: 40 }}
-      >
-        💬 Need help?
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="fixed bottom-5 right-5 w-full max-w-sm rounded-lg shadow-2xl flex flex-col no-print"
-      style={{ background: "#fff", border: `1px solid ${LINE}`, maxHeight: "70vh", zIndex: 40 }}
-    >
-      <div className="flex items-center justify-between px-4 py-3" style={{ background: INK, borderRadius: "8px 8px 0 0" }}>
-        <span className="text-sm font-medium text-white">Report assistant</span>
-        <button onClick={() => setOpen(false)} className="text-white text-lg" aria-label="Close">×</button>
-      </div>
-
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3" style={{ minHeight: 200 }}>
-        {messages.length === 0 && (
-          <p className="text-xs" style={{ color: MUTED }}>
-            Not sure what to put in a field, or want help figuring out realistic numbers for your business? Ask here —
-            I can look things up and suggest values for you to review before anything's filled in.
-          </p>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`text-sm ${m.role === "user" ? "text-right" : ""}`}>
-            <div
-              className="inline-block px-3 py-2 rounded-lg max-w-[85%] text-left"
-              style={m.role === "user" ? { background: GOLD_L, color: TEXT } : { background: "#f2f2f2", color: TEXT }}
-            >
-              {m.content}
-            </div>
-          </div>
-        ))}
-        {busy && <p className="text-xs" style={{ color: MUTED }}>Thinking…</p>}
-        {error && <p className="text-xs" style={{ color: "#B3261E" }}>{error}</p>}
-
-        {pendingUpdates && (
-          <div className="text-xs p-3 rounded" style={{ background: GOLD_L, border: `1px solid ${LINE}` }}>
-            <p className="mb-2">I can fill in: <b>{summarizeUpdates(pendingUpdates)}</b>. Review the form after applying — you can always edit anything.</p>
-            <div className="flex gap-3">
-              <button onClick={applyUpdates} className="underline font-medium" style={{ color: INK }}>Apply to form</button>
-              <button onClick={() => setPendingUpdates(null)} className="underline" style={{ color: MUTED }}>Ignore</button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex gap-2 p-3 border-t" style={{ borderColor: LINE }}>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Ask about any field…"
-          className="flex-1 border rounded px-3 py-2 text-sm"
-          style={{ borderColor: LINE }}
-        />
-        <button onClick={send} disabled={busy || !input.trim()} className="px-3 py-2 rounded text-sm font-medium" style={{ background: INK, color: "#fff" }}>
-          Send
-        </button>
-      </div>
-    </div>
-  );
-}
-
 
 // Shows the exact same tiers computeFee() uses server-side (fetched fresh
 // from /api/get-price-list, not hardcoded here) — so this can never show a
