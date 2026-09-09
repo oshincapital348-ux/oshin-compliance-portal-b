@@ -15,6 +15,51 @@
 // current terms if you get there.
 const DUCKDUCKGO_URL = "https://api.duckduckgo.com/";
 
+// Google occasionally renames/retires model IDs, which is exactly what
+// broke this once already (gemini-2.0-flash returned a 404). Instead of
+// hardcoding a name that can go stale again, ask Google's own API which
+// models currently exist and pick a fast/free-tier-friendly one — this
+// self-heals across future renames without needing a redeploy.
+// Cached at module scope so a warm function instance only asks once, not
+// on every single chat message.
+let cachedModel = null;
+
+async function resolveModel() {
+  if (process.env.GEMINI_MODEL) return process.env.GEMINI_MODEL; // explicit override always wins
+  if (cachedModel) return cachedModel;
+
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
+    if (!res.ok) throw new Error(`list models failed: ${res.status}`);
+    const data = await res.json();
+    const models = data.models || [];
+
+    // Prefer a "flash" model that supports generateContent (fast + free-
+    // tier friendly) and isn't a narrow specialist variant (vision-only,
+    // embedding, tts, image-generation, etc.) or a dated/experimental
+    // pinned snapshot — those tend to have odd behavior or get retired fast.
+    const candidates = models.filter((m) => {
+      const name = (m.name || "").replace("models/", "");
+      return (
+        m.supportedGenerationMethods?.includes("generateContent") &&
+        name.includes("flash") &&
+        !/vision|embedding|tts|image|thinking|exp|preview|\d{3,}/.test(name)
+      );
+    });
+
+    const chosen = candidates[0] || models.find((m) => m.supportedGenerationMethods?.includes("generateContent"));
+    if (!chosen) throw new Error("no usable model found");
+
+    cachedModel = chosen.name.replace("models/", "");
+    return cachedModel;
+  } catch (err) {
+    console.error("Model auto-discovery failed, falling back to a guess:", err);
+    return "gemini-flash-latest"; // last-resort guess if even listing models fails
+  }
+}
+
+
+
 async function duckDuckGoSearch(query) {
   try {
     const url = `${DUCKDUCKGO_URL}?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
@@ -143,7 +188,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
     parts: [{ text: m.content }],
   }));
 
-  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+  const model = await resolveModel();
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   try {
@@ -167,7 +212,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
 
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
-        console.error("Gemini API error:", response.status, errText);
+        console.error("Gemini API error:", "model=" + model, response.status, errText);
         return res.status(502).json({ error: "The assistant is having trouble responding right now. Please try again." });
       }
 
