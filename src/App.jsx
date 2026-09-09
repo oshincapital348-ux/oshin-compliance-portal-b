@@ -1640,15 +1640,15 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
 
 
 // Shows the exact same tiers computeFee() uses server-side (fetched fresh
-// from /api/get-price-list, not hardcoded here) — so this can never show a
-// customer a price different from what they're actually charged, even if
+// from /api/pricing?mode=list, not hardcoded here) — so this can never show
+// a customer a price different from what they're actually charged, even if
 // PRICING_TIERS changes later.
 function PriceListModal({ onClose }) {
   const [tiers, setTiers] = useState(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
-    fetch("/api/get-price-list")
+    fetch("/api/pricing?mode=list")
       .then((r) => r.json())
       .then((data) => setTiers(Array.isArray(data.tiers) ? data.tiers : []))
       .catch(() => setError(true));
@@ -1756,8 +1756,8 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
   const [razorpayLive, setRazorpayLive] = useState(true);
   useEffect(() => {
     setFeeLoading(true);
-    const params = new URLSearchParams({ projectCost, reportType, contact: customerContact || "" });
-    fetch(`/api/get-fee?${params}`)
+    const params = new URLSearchParams({ mode: "fee", projectCost, reportType, contact: customerContact || "" });
+    fetch(`/api/pricing?${params}`)
       .then((r) => r.json())
       .then((data) => {
         setFee(data.fee);
@@ -1852,8 +1852,8 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
     setBusy(true);
     setError("");
     try {
-      const params = new URLSearchParams({ projectCost, reportType, contact: customerContact || "" });
-      const res = await fetch(`/api/get-payment-details?${params}`);
+      const params = new URLSearchParams({ mode: "qr", projectCost, reportType, contact: customerContact || "" });
+      const res = await fetch(`/api/pricing?${params}`);
       if (!res.ok) throw new Error("Could not load payment details.");
       const { upiId, amount, payeeName } = await res.json();
 
