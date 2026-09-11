@@ -1518,11 +1518,17 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
     setBusy(true);
     setError("");
     setPendingUpdates(null);
+    // Matches (and stays just under) the server's own 30s limit — if the
+    // server is going to time out anyway, no reason to leave the customer
+    // staring at "…" for even longer waiting to find that out.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 28000);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: msgList, reportType, formSnapshot }),
+        signal: controller.signal,
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong.");
@@ -1531,8 +1537,9 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
         setPendingUpdates(data.proposedUpdates);
       }
     } catch (e) {
-      setError(e.message);
+      setError(e.name === "AbortError" ? "That took too long to respond. Please try again." : e.message);
     } finally {
+      clearTimeout(timeoutId);
       setBusy(false);
     }
   };
