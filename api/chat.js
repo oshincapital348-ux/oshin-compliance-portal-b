@@ -51,7 +51,7 @@ async function candidateModels() {
 
     const ordered = [...flashOld, ...flashOther, ...rest];
     if (ordered.length === 0) throw new Error("no usable model found in catalog");
-    return ordered.slice(0, 6); // try at most 6 before giving up, to bound latency/cost
+    return ordered.slice(0, 3); // try at most 3 before giving up — each attempt burns real quota, and a free-tier limit is often only a handful of requests per minute
   } catch (err) {
     console.error("Model auto-discovery failed, falling back to guesses:", err);
     return ["gemini-1.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]; // last-resort guesses if even listing models fails
@@ -106,7 +106,7 @@ Your job:
 - Before proposing any numbers, get at least a rough sense of expected sales/revenue AND the main cost drivers (staff count and rough wages, main materials) — a couple of quick questions, not a long interview. Don't jump straight from "I want to start a bakery" to filling in specific rupee figures with no revenue or cost context at all.
 - Before calling propose_form_updates with cost/revenue numbers, sanity-check them yourself: rough total costs (wages + materials + overheads + admin) should leave a plausible margin against revenue, not exceed it. If the numbers you're about to propose would show the business losing money every year, that's a sign you're guessing rather than reasoning from what the person told you — ask a clarifying question instead of proposing numbers that don't work. It's fine for a real business to be tight on margin, but don't hand someone a report that's mathematically guaranteed to show a loss because of a rushed guess.
 - When you have enough information to fill in specific fields, use the propose_form_updates tool to suggest exact values — the person will see and approve each one before anything is actually filled in, so it's fine to propose partial or tentative values as a starting point they can adjust.
-- Keep replies short and conversational. Ask one question at a time rather than a long checklist.
+- Keep replies short — a few sentences, not a long structured breakdown with many headers and bullet points. If you're listing multiple issues or fields, pick the 2-3 most important ones rather than being exhaustive; the person can always ask for more detail.
 - Never fabricate PMEGP/MUDRA/MSME scheme rules — if you're not certain, search for it rather than guessing, since this affects a real loan application. If your search doesn't turn up a clear answer, say you're not certain rather than stating it as fact.
 - You cannot see what's currently in their form beyond what's given to you below. If something seems already filled in, don't ask about it again.
 
@@ -200,7 +200,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         tools,
-        generationConfig: { maxOutputTokens: 1024 },
+        generationConfig: { maxOutputTokens: 2048 },
       }),
     });
 
@@ -246,6 +246,9 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
         console.error("Gemini API error:", "model=" + model, response.status, errText);
         if (response.status === 429) {
           return res.status(429).json({ error: "The assistant hit its free-tier usage limit for a moment. Please wait about a minute and try again." });
+        }
+        if (response.status === 500 || response.status === 503) {
+          return res.status(503).json({ error: "Google's assistant service is temporarily overloaded. Please try again in a few seconds." });
         }
         return res.status(502).json({ error: "The assistant is having trouble responding right now. Please try again." });
       }

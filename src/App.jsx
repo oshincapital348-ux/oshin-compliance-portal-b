@@ -1514,12 +1514,7 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, pendingUpdates, busy]);
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || busy) return;
-    const nextMessages = [...messages, { role: "user", content: text }];
-    setMessages(nextMessages);
-    setInput("");
+  const sendMessages = async (msgList) => {
     setBusy(true);
     setError("");
     setPendingUpdates(null);
@@ -1527,7 +1522,7 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, reportType, formSnapshot }),
+        body: JSON.stringify({ messages: msgList, reportType, formSnapshot }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong.");
@@ -1541,6 +1536,20 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
       setBusy(false);
     }
   };
+
+  const send = () => {
+    const text = input.trim();
+    if (!text || busy) return;
+    const nextMessages = [...messages, { role: "user", content: text }];
+    setMessages(nextMessages);
+    setInput("");
+    sendMessages(nextMessages);
+  };
+
+  // Retries the same conversation as-is — useful for the free-tier
+  // rate-limit/overload errors, which are transient and often succeed a
+  // few seconds later without needing to retype anything.
+  const retry = () => sendMessages(messages);
 
   const applyUpdates = () => {
     onApplyUpdates(pendingUpdates);
@@ -1608,7 +1617,12 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
           </div>
         ))}
         {busy && <p className="text-xs" style={{ color: MUTED }}>Thinking…</p>}
-        {error && <p className="text-xs" style={{ color: "#B3261E" }}>{error}</p>}
+        {error && (
+          <div className="text-xs" style={{ color: "#B3261E" }}>
+            <p className="mb-1">{error}</p>
+            <button onClick={retry} className="underline font-medium">Retry</button>
+          </div>
+        )}
 
         {pendingUpdates && (
           <div className="text-xs p-3 rounded" style={{ background: GOLD_L, border: `1px solid ${LINE}` }}>
