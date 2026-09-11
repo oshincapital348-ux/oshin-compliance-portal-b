@@ -244,6 +244,9 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
         console.error("Gemini API error:", "model=" + model, response.status, errText);
+        if (response.status === 429) {
+          return res.status(429).json({ error: "The assistant hit its free-tier usage limit for a moment. Please wait about a minute and try again." });
+        }
         return res.status(502).json({ error: "The assistant is having trouble responding right now. Please try again." });
       }
 
