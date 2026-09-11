@@ -16,45 +16,45 @@
 const DUCKDUCKGO_URL = "https://api.duckduckgo.com/";
 
 // Google occasionally renames/retires model IDs, which is exactly what
-// broke this once already (gemini-2.0-flash returned a 404). Instead of
-// hardcoding a name that can go stale again, ask Google's own API which
-// models currently exist and pick a fast/free-tier-friendly one — this
-// self-heals across future renames without needing a redeploy.
-// Cached at module scope so a warm function instance only asks once, not
-// on every single chat message.
+// broke this once already (gemini-2.0-flash returned a 404). Rather than
+// commit to a single guessed name, this returns an ORDERED SHORTLIST of
+// candidates — the actual call site below tries each one for real and
+// uses whichever one genuinely works, which also self-corrects for a case
+// we hit in testing: a model can appear in the list-models catalog yet
+// still 404 on the actual generation call (likely a free-tier access
+// restriction on newer model generations, not a naming issue at all).
+// Cached at module scope so a warm function instance only re-resolves
+// once it needs to, not on every single chat message.
 let cachedModel = null;
 
-async function resolveModel() {
-  if (process.env.GEMINI_MODEL) return process.env.GEMINI_MODEL; // explicit override always wins
-  if (cachedModel) return cachedModel;
+async function candidateModels() {
+  if (process.env.GEMINI_MODEL) return [process.env.GEMINI_MODEL]; // explicit override always wins, no fallback list
+  if (cachedModel) return [cachedModel];
 
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
     if (!res.ok) throw new Error(`list models failed: ${res.status}`);
     const data = await res.json();
-    const models = data.models || [];
+    const models = (data.models || []).filter((m) => m.supportedGenerationMethods?.includes("generateContent"));
 
-    // Prefer a "flash" model that supports generateContent (fast + free-
-    // tier friendly) and isn't a narrow specialist variant (vision-only,
-    // embedding, tts, image-generation, etc.) or a dated/experimental
-    // pinned snapshot — those tend to have odd behavior or get retired fast.
-    const candidates = models.filter((m) => {
-      const name = (m.name || "").replace("models/", "");
-      return (
-        m.supportedGenerationMethods?.includes("generateContent") &&
-        name.includes("flash") &&
-        !/vision|embedding|tts|image|thinking|exp|preview|\d{3,}/.test(name)
-      );
-    });
+    const names = models.map((m) => (m.name || "").replace("models/", "")).filter(Boolean);
 
-    const chosen = candidates[0] || models.find((m) => m.supportedGenerationMethods?.includes("generateContent"));
-    if (!chosen) throw new Error("no usable model found");
+    // Order matters: older, longer-established "flash" generations tend to
+    // stay free-tier-accessible the longest, so try those before newer
+    // ones that may require billing. Exclude narrow specialist variants
+    // (vision-only, embedding, tts, image-gen) and raw experimental/
+    // preview snapshots, which tend to be unstable or short-lived.
+    const usable = names.filter((n) => !/vision|embedding|tts|image|thinking|exp|preview/.test(n));
+    const flashOld = usable.filter((n) => n.includes("flash") && /1\.5/.test(n));
+    const flashOther = usable.filter((n) => n.includes("flash") && !flashOld.includes(n));
+    const rest = usable.filter((n) => !flashOld.includes(n) && !flashOther.includes(n));
 
-    cachedModel = chosen.name.replace("models/", "");
-    return cachedModel;
+    const ordered = [...flashOld, ...flashOther, ...rest];
+    if (ordered.length === 0) throw new Error("no usable model found in catalog");
+    return ordered.slice(0, 6); // try at most 6 before giving up, to bound latency/cost
   } catch (err) {
-    console.error("Model auto-discovery failed, falling back to a guess:", err);
-    return "gemini-flash-latest"; // last-resort guess if even listing models fails
+    console.error("Model auto-discovery failed, falling back to guesses:", err);
+    return ["gemini-1.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]; // last-resort guesses if even listing models fails
   }
 }
 
@@ -188,27 +188,56 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
     parts: [{ text: m.content }],
   }));
 
-  const model = await resolveModel();
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const candidates = await candidateModels();
+
+  const callGemini = (modelName) =>
+    fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: systemPrompt }] },
+        contents,
+        tools,
+        generationConfig: { maxOutputTokens: 1024 },
+      }),
+    });
 
   try {
     let finalText = "";
     let proposedUpdates = null;
+    let model = null; // locked in once a candidate actually succeeds
 
     // Bounded tool loop: the model can call web_search, get a result, and
     // respond again — up to a few rounds, so a confused loop can't run away
     // and burn through free-tier quota unbounded.
     for (let round = 0; round < 4; round++) {
-      const response = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system_instruction: { parts: [{ text: systemPrompt }] },
-          contents,
-          tools,
-          generationConfig: { maxOutputTokens: 1024 },
-        }),
-      });
+      let response;
+
+      if (model) {
+        // Already know which model works for this key — use it directly.
+        response = await callGemini(model);
+      } else {
+        // First call of the conversation: actually try each candidate for
+        // real (not just trust the list-models catalog) until one returns
+        // something other than 404. This is what catches a model that's
+        // *listed* as available but still isn't reachable on this key's
+        // access tier — the exact situation that kept breaking this before.
+        let lastErrText = "";
+        for (const candidate of candidates) {
+          response = await callGemini(candidate);
+          if (response.status !== 404) {
+            model = candidate;
+            cachedModel = candidate; // cache for future warm invocations
+            break;
+          }
+          lastErrText = await response.text().catch(() => "");
+          console.error("Gemini candidate model rejected (404):", candidate, lastErrText);
+        }
+        if (!model) {
+          console.error("All candidate models failed:", candidates.join(", "), lastErrText);
+          return res.status(502).json({ error: "The assistant couldn't find a working model on your Gemini account. Check that your API key has access to at least one Gemini model in Google AI Studio." });
+        }
+      }
 
       if (!response.ok) {
         const errText = await response.text().catch(() => "");
