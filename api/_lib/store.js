@@ -112,6 +112,36 @@ export async function markConsumed(tokenHash, ttlSeconds) {
   }
 }
 
+// Which Gemini model actually works on this API key, found once and reused
+// forever after (until it stops working). This matters a lot on a free
+// tier: an in-memory-only cache gets wiped every time the serverless
+// function cold-starts, which happens often on light traffic — without
+// persistent storage, nearly every message would re-discover the model
+// from scratch, burning several real API calls against a tight free-tier
+// quota just to answer one question. A week-long TTL is generous — model
+// availability doesn't change that often, and a stale entry just costs one
+// extra discovery round the next time it's wrong.
+const GEMINI_MODEL_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+export async function getCachedGeminiModel() {
+  if (!redis) return null;
+  try {
+    return await redis.get("oshin:geminiModel");
+  } catch (err) {
+    console.error("Failed to read cached Gemini model:", err);
+    return null;
+  }
+}
+
+export async function setCachedGeminiModel(model) {
+  if (!redis || !model) return;
+  try {
+    await redis.set("oshin:geminiModel", model, { ex: GEMINI_MODEL_TTL_SECONDS });
+  } catch (err) {
+    console.error("Failed to cache Gemini model:", err);
+  }
+}
+
 // How long a payment counts toward the "don't charge the same customer
 // twice" discount on the OTHER report type. 15 days — enough to cover the
 // realistic gap between getting one report done and a bank asking for the

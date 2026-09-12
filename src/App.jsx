@@ -1604,7 +1604,7 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
 
   return (
     <div
-      className="fixed bottom-5 right-5 w-full max-w-sm rounded-lg shadow-2xl flex flex-col no-print"
+      className="fixed bottom-5 left-4 right-4 sm:left-auto sm:right-5 sm:w-full sm:max-w-sm rounded-lg shadow-2xl flex flex-col no-print"
       style={{ background: "#fff", border: `1px solid ${LINE}`, maxHeight: "70vh", zIndex: 40 }}
     >
       <div className="flex items-center justify-between px-4 py-3" style={{ background: INK, borderRadius: "8px 8px 0 0" }}>

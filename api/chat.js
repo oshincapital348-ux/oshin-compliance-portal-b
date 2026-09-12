@@ -1,3 +1,5 @@
+import { getCachedGeminiModel, setCachedGeminiModel } from "./_lib/store.js";
+
 // Powers the customer-facing chat assistant using Google's Gemini API,
 // which has a genuinely free tier (get a key at aistudio.google.com — no
 // credit card needed to start). Free tiers come with rate limits (requests
@@ -27,9 +29,23 @@ const DUCKDUCKGO_URL = "https://api.duckduckgo.com/";
 // once it needs to, not on every single chat message.
 let cachedModel = null;
 
-async function candidateModels() {
+async function candidateModels(forceRefresh = false) {
   if (process.env.GEMINI_MODEL) return [process.env.GEMINI_MODEL]; // explicit override always wins, no fallback list
-  if (cachedModel) return [cachedModel];
+  if (!forceRefresh) {
+    if (cachedModel) return [cachedModel];
+
+    // Check persistent storage before making ANY live API call — this is
+    // what actually fixes repeated rate-limiting: once any request, from any
+    // server instance, ever discovers a working model, every future request
+    // (even after a cold start) can skip discovery entirely and go straight
+    // to a single real call, instead of re-running list-models + trying
+    // several candidates every time the function cold-starts.
+    const persisted = await getCachedGeminiModel();
+    if (persisted) {
+      cachedModel = persisted;
+      return [persisted];
+    }
+  }
 
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`);
@@ -190,7 +206,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
     parts: [{ text: m.content }],
   }));
 
-  const candidates = await candidateModels();
+  let candidates = await candidateModels();
 
   const callGemini = (modelName) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
@@ -229,12 +245,35 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
           response = await callGemini(candidate);
           if (response.status !== 404) {
             model = candidate;
-            cachedModel = candidate; // cache for future warm invocations
+            cachedModel = candidate; // in-memory for this instance...
+            setCachedGeminiModel(candidate).catch(() => {}); // ...and persisted so future cold starts skip discovery entirely
             break;
           }
           lastErrText = await response.text().catch(() => "");
           console.error("Gemini candidate model rejected (404):", candidate, lastErrText);
         }
+
+        // The cached/persisted model has stopped working (likely retired) —
+        // clear it and do one real discovery pass instead of failing
+        // outright. Only worth doing when the failed attempt came from a
+        // 1-item cached/persisted list, not from an already-exhaustive
+        // fresh discovery (which would just fail the same way again).
+        if (!model && candidates.length === 1 && !process.env.GEMINI_MODEL) {
+          console.error("Cached model no longer works, forcing fresh discovery:", candidates[0]);
+          cachedModel = null;
+          candidates = await candidateModels(true);
+          for (const candidate of candidates) {
+            response = await callGemini(candidate);
+            if (response.status !== 404) {
+              model = candidate;
+              cachedModel = candidate;
+              setCachedGeminiModel(candidate).catch(() => {});
+              break;
+            }
+            lastErrText = await response.text().catch(() => "");
+          }
+        }
+
         if (!model) {
           console.error("All candidate models failed:", candidates.join(", "), lastErrText);
           return res.status(502).json({ error: "The assistant couldn't find a working model on your Gemini account. Check that your API key has access to at least one Gemini model in Google AI Studio." });
