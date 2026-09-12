@@ -946,16 +946,22 @@ export default function App() {
   // the assistant doesn't currently propose into).
   const applyFormUpdates = (u) => {
     if (!u) return;
+    // Defensively coerce every value to a number — function-calling APIs
+    // occasionally return a numeric-looking value as a string even when the
+    // schema says number, which would otherwise silently corrupt the
+    // report's arithmetic (string concatenation instead of addition).
+    const numify = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, Number(v) || 0]));
+
     if (u.entrepreneur) setEntrepreneur((prev) => ({ ...prev, ...u.entrepreneur }));
-    if (u.capex) setCapex((prev) => ({ ...prev, ...u.capex }));
+    if (u.capex) setCapex((prev) => ({ ...prev, ...numify(u.capex) }));
     if (u.addMachinery?.length) setMachinery((prev) => [...prev, ...u.addMachinery.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
-    if (u.finance) setFinance((prev) => ({ ...prev, ...u.finance }));
+    if (u.finance) setFinance((prev) => ({ ...prev, ...numify(u.finance) }));
     if (u.addProducts?.length) setProducts((prev) => [...prev, ...u.addProducts.map((p) => ({ id: uid(), name: p.name || "", qty: Number(p.qty) || 0, rate: Number(p.rate) || 0 }))]);
     if (Array.isArray(u.capacityUtil) && u.capacityUtil.length === 5) setCapacityUtil(u.capacityUtil.map((n) => Number(n) || 0));
     if (u.addRawMaterials?.length) setRawMaterials((prev) => [...prev, ...u.addRawMaterials.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
     if (u.addWages?.length) setWages((prev) => [...prev, ...u.addWages.map((w) => ({ id: uid(), name: w.name || "", workers: Number(w.workers) || 0, perMonth: Number(w.perMonth) || 0 }))]);
-    if (u.opex) setOpex((prev) => ({ ...prev, ...u.opex }));
-    if (u.admin) setAdmin((prev) => ({ ...prev, ...u.admin }));
+    if (u.opex) setOpex((prev) => ({ ...prev, ...numify(u.opex) }));
+    if (u.admin) setAdmin((prev) => ({ ...prev, ...numify(u.admin) }));
     if (u.depRate != null) setDepRate(Number(u.depRate) || 10);
     if (u.details) setDetails((prev) => ({ ...prev, ...u.details }));
     if (u.narrative) setNarrative((prev) => ({ ...prev, ...u.narrative }));
