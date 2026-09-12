@@ -79,7 +79,11 @@ async function candidateModels(forceRefresh = false) {
 async function duckDuckGoSearch(query) {
   try {
     const url = `${DUCKDUCKGO_URL}?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const res = await fetch(url);
+    // A hanging search shouldn't be able to eat most of the request's time
+    // budget — cap it well under the overall function timeout.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
     if (!res.ok) return "Search failed — no results available.";
     const data = await res.json();
     const parts = [];
@@ -208,7 +212,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
 
   let candidates = await candidateModels();
 
-  const callGemini = (modelName) =>
+  const rawCallGemini = (modelName) =>
     fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -219,6 +223,17 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
         generationConfig: { maxOutputTokens: 2048 },
       }),
     });
+
+  // Google's servers occasionally return a transient 500/503 under load —
+  // often gone a second later. Retrying once with a short delay resolves
+  // most of these silently, instead of showing the customer an error for
+  // something that would've worked fine a moment later.
+  const callGemini = async (modelName) => {
+    const first = await rawCallGemini(modelName);
+    if (first.status !== 500 && first.status !== 503) return first;
+    await new Promise((r) => setTimeout(r, 1200));
+    return rawCallGemini(modelName);
+  };
 
   try {
     let finalText = "";

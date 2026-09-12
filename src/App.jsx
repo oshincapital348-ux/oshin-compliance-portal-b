@@ -1512,9 +1512,23 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
   const [messages, setMessages] = useState([]); // [{role, content}]
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [waitSeconds, setWaitSeconds] = useState(0);
   const [error, setError] = useState("");
   const [pendingUpdates, setPendingUpdates] = useState(null);
   const scrollRef = useRef(null);
+
+  // A visible, ticking timer while waiting — makes it unmistakable that
+  // something is happening and the customer should wait rather than
+  // wonder if the message went through and send it again.
+  useEffect(() => {
+    if (!busy) {
+      setWaitSeconds(0);
+      return;
+    }
+    const start = Date.now();
+    const interval = setInterval(() => setWaitSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(interval);
+  }, [busy]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -1629,7 +1643,12 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
             </div>
           </div>
         ))}
-        {busy && <p className="text-xs" style={{ color: MUTED }}>Thinking…</p>}
+        {busy && (
+          <div className="text-xs p-2 rounded" style={{ background: GOLD_L, color: TEXT }}>
+            <p className="font-medium">⏳ Thinking… ({waitSeconds}s)</p>
+            <p style={{ color: MUTED }}>This can take up to 30 seconds — please wait for the reply before sending another message.</p>
+          </div>
+        )}
         {error && (
           <div className="text-xs" style={{ color: "#B3261E" }}>
             <p className="mb-1">{error}</p>
@@ -1653,9 +1672,10 @@ function ChatWidget({ reportType, formSnapshot, onApplyUpdates }) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Ask about any field…"
+          placeholder={busy ? "Please wait for the reply…" : "Ask about any field…"}
+          disabled={busy}
           className="flex-1 border rounded px-3 py-2 text-sm"
-          style={{ borderColor: LINE }}
+          style={{ borderColor: LINE, background: busy ? "#f2f2f2" : "#fff", color: busy ? MUTED : TEXT }}
         />
         <button onClick={send} disabled={busy || !input.trim()} className="px-3 py-2 rounded text-sm font-medium" style={{ background: INK, color: "#fff" }}>
           Send
