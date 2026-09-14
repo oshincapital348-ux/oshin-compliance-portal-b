@@ -121,12 +121,18 @@ export async function markConsumed(tokenHash, ttlSeconds) {
 // quota just to answer one question. A week-long TTL is generous — model
 // availability doesn't change that often, and a stale entry just costs one
 // extra discovery round the next time it's wrong.
+//
+// The ":v2" suffix in the key name is a version bump — whenever the
+// candidate-selection LOGIC changes (e.g. now preferring "lite" models for
+// their higher free quota), bumping this forces every deployment to
+// re-discover fresh instead of keeping whatever was cached under the old
+// logic. Bump it again in the future if the selection logic changes again.
 const GEMINI_MODEL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export async function getCachedGeminiModel() {
   if (!redis) return null;
   try {
-    return await redis.get("oshin:geminiModel");
+    return await redis.get("oshin:geminiModel:v2");
   } catch (err) {
     console.error("Failed to read cached Gemini model:", err);
     return null;
@@ -136,7 +142,7 @@ export async function getCachedGeminiModel() {
 export async function setCachedGeminiModel(model) {
   if (!redis || !model) return;
   try {
-    await redis.set("oshin:geminiModel", model, { ex: GEMINI_MODEL_TTL_SECONDS });
+    await redis.set("oshin:geminiModel:v2", model, { ex: GEMINI_MODEL_TTL_SECONDS });
   } catch (err) {
     console.error("Failed to cache Gemini model:", err);
   }

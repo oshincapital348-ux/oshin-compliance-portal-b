@@ -55,17 +55,24 @@ async function candidateModels(forceRefresh = false) {
 
     const names = models.map((m) => (m.name || "").replace("models/", "")).filter(Boolean);
 
-    // Order matters: older, longer-established "flash" generations tend to
-    // stay free-tier-accessible the longest, so try those before newer
-    // ones that may require billing. Exclude narrow specialist variants
-    // (vision-only, embedding, tts, image-gen) and raw experimental/
-    // preview snapshots, which tend to be unstable or short-lived.
+    // Order matters, most-generous-free-quota first:
+    // 1. "lite" (or "8b") variants — Google builds these specifically for
+    //    high-volume, low-cost use cases like a simple chat assistant, and
+    //    they typically get meaningfully higher free-tier rate limits than
+    //    the standard flash models, precisely because they're smaller.
+    // 2. Older, longer-established "flash" generations, which tend to stay
+    //    free-tier-accessible the longest.
+    // 3. Other flash variants, then anything else usable.
+    // Excludes narrow specialist variants (vision-only, embedding, tts,
+    // image-gen) and raw experimental/preview snapshots, which tend to be
+    // unstable, short-lived, or billing-only.
     const usable = names.filter((n) => !/vision|embedding|tts|image|thinking|exp|preview/.test(n));
-    const flashOld = usable.filter((n) => n.includes("flash") && /1\.5/.test(n));
-    const flashOther = usable.filter((n) => n.includes("flash") && !flashOld.includes(n));
-    const rest = usable.filter((n) => !flashOld.includes(n) && !flashOther.includes(n));
+    const flashLite = usable.filter((n) => /lite|8b/.test(n));
+    const flashOld = usable.filter((n) => !flashLite.includes(n) && n.includes("flash") && /1\.5/.test(n));
+    const flashOther = usable.filter((n) => !flashLite.includes(n) && !flashOld.includes(n) && n.includes("flash"));
+    const rest = usable.filter((n) => ![...flashLite, ...flashOld, ...flashOther].includes(n));
 
-    const ordered = [...flashOld, ...flashOther, ...rest];
+    const ordered = [...flashLite, ...flashOld, ...flashOther, ...rest];
     if (ordered.length === 0) throw new Error("no usable model found in catalog");
     return ordered.slice(0, 3); // try at most 3 before giving up — each attempt burns real quota, and a free-tier limit is often only a handful of requests per minute
   } catch (err) {
