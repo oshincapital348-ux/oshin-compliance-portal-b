@@ -1,4 +1,4 @@
-import { getCachedGeminiModel, setCachedGeminiModel } from "./_lib/store.js";
+import { getCachedGeminiModel, setCachedGeminiModel, checkRateLimit, getClientIp } from "./_lib/store.js";
 
 // Powers the customer-facing chat assistant using Google's Gemini API,
 // which has a genuinely free tier (get a key at aistudio.google.com — no
@@ -105,6 +105,15 @@ export default async function handler(req, res) {
 
   if (!process.env.GEMINI_API_KEY) {
     return res.status(500).json({ error: "Chat assistant is not configured yet. Set GEMINI_API_KEY in environment variables." });
+  }
+
+  // Generous limit for a real customer having a real conversation, but
+  // enough to stop a script from draining the shared free-tier quota for
+  // everyone else — a real risk once ad traffic brings strangers here.
+  const ip = getClientIp(req);
+  const allowed = await checkRateLimit(`chat:${ip}`, 20, 10 * 60);
+  if (!allowed) {
+    return res.status(429).json({ error: "You've sent a lot of messages in a short time — please wait a few minutes and try again." });
   }
 
   const { messages, reportType, formSnapshot } = req.body || {};

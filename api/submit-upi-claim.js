@@ -1,4 +1,4 @@
-import { recordTransaction, notify } from "./_lib/store.js";
+import { recordTransaction, notify, checkRateLimit, getClientIp } from "./_lib/store.js";
 import { sendAdminClaimAlert } from "./_lib/email.js";
 
 // A UPI claim is the customer SAYING they paid — not proof. It gets recorded
@@ -7,6 +7,14 @@ import { sendAdminClaimAlert } from "./_lib/email.js";
 // from the admin panel.
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  // A real customer submits this once per payment — 5 per hour is generous,
+  // but stops someone spamming your alert inbox with fake claims.
+  const ip = getClientIp(req);
+  const allowed = await checkRateLimit(`upi-claim:${ip}`, 5, 60 * 60);
+  if (!allowed) {
+    return res.status(429).json({ error: "Too many submissions. Please contact support directly if you need help." });
+  }
 
   const { utr, contact, amount, reportType } = req.body || {};
   if (!utr || !contact) return res.status(400).json({ error: "Missing fields" });

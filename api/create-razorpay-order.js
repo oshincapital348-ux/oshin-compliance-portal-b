@@ -1,12 +1,20 @@
 import Razorpay from "razorpay";
 import { computeFee, applyRepeatDiscount } from "./_lib/pricing.js";
-import { getContactPaidHistory } from "./_lib/store.js";
+import { getContactPaidHistory, checkRateLimit, getClientIp } from "./_lib/store.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
     return res.status(500).json({ error: "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET." });
+  }
+
+  // A real customer creates one order per attempted payment — this just
+  // stops a script from spamming Razorpay order creation.
+  const ip = getClientIp(req);
+  const allowed = await checkRateLimit(`razorpay-order:${ip}`, 15, 10 * 60);
+  if (!allowed) {
+    return res.status(429).json({ error: "Too many payment attempts. Please wait a few minutes and try again." });
   }
 
   // The fee is computed HERE, server-side, from the tier the customer's

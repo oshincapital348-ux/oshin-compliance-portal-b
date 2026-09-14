@@ -186,3 +186,32 @@ export async function getContactPaidHistory(contact) {
     return null;
   }
 }
+
+// Generic rate limiter for public endpoints, keyed by whatever the caller
+// passes (usually "endpointName:ipAddress"). Returns true if the request
+// should be ALLOWED, false if the limit's been hit. If Redis isn't
+// configured, this fails open (allows everything) rather than breaking the
+// site — rate limiting is a hardening layer, not something that should be
+// able to take the whole app down if storage is briefly unavailable.
+export async function checkRateLimit(key, maxRequests, windowSeconds) {
+  if (!redis) return true;
+  try {
+    const redisKey = `oshin:ratelimit:${key}`;
+    const count = await redis.incr(redisKey);
+    if (count === 1) {
+      await redis.expire(redisKey, windowSeconds);
+    }
+    return count <= maxRequests;
+  } catch (err) {
+    console.error("Rate limit check failed (allowing request):", err);
+    return true;
+  }
+}
+
+// Best-effort real client IP behind Vercel's proxy — good enough for abuse
+// throttling, not meant to be a precise/spoof-proof identity.
+export function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.length > 0) return forwarded.split(",")[0].trim();
+  return req.socket?.remoteAddress || "unknown";
+}

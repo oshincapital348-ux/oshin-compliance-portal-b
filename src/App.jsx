@@ -1828,7 +1828,10 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectCost, reportType, contact: customerContact || "" }),
       });
-      if (!orderRes.ok) throw new Error("Could not start payment. Please try again.");
+      if (!orderRes.ok) {
+        const errData = await orderRes.json().catch(() => ({}));
+        throw new Error(errData.error || "Could not start payment. Please try again.");
+      }
       const order = await orderRes.json();
 
       const rzp = new window.Razorpay({
@@ -1930,7 +1933,8 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ utr, contact, amount: payDetails?.amount || null, reportType }),
       });
-      if (!res.ok) throw new Error("Could not submit. Please try again.");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Could not submit. Please try again.");
       setUpiSubmitted(true);
     } catch (e) {
       setError(e.message);
@@ -1953,7 +1957,7 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
       if (data.ok) {
         setAdminToken(data.accessToken);
         setMode("admin-panel");
-      } else setError("Incorrect admin code.");
+      } else setError(data.error || "Incorrect admin code.");
     } catch {
       setError("Could not verify. Please try again.");
     } finally {
