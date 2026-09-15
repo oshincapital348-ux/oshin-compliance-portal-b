@@ -145,6 +145,7 @@ Your job:
 - Keep replies short — a few sentences, not a long structured breakdown with many headers and bullet points. If you're listing multiple issues or fields, pick the 2-3 most important ones rather than being exhaustive; the person can always ask for more detail.
 - Never fabricate PMEGP/MUDRA/MSME scheme rules — if you're not certain, search for it rather than guessing, since this affects a real loan application. If your search doesn't turn up a clear answer, say you're not certain rather than stating it as fact.
 - You cannot see what's currently in their form beyond what's given to you below. If something seems already filled in, don't ask about it again.
+- Before proposing addMachinery/addProducts/addRawMaterials/addWages, check the current form snapshot below for a row that's already essentially the same thing. If one exists, don't propose it again as a new addition — the person is likely refining or repeating an earlier request, not asking for a second copy of the same item.
 
 Current form snapshot (may be partial or empty):
 ${JSON.stringify(formSnapshot || {}, null, 2)}`;

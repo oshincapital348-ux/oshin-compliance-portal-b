@@ -952,14 +952,44 @@ export default function App() {
     // report's arithmetic (string concatenation instead of addition).
     const numify = (obj) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, Number(v) || 0]));
 
+    // Merges proposed rows into an existing list by NAME instead of always
+    // appending — without this, a customer refining or repeating an earlier
+    // request in chat (very natural to do) silently doubles their numbers
+    // ("Grocery Stock" ends up as two separate rows, quietly inflating the
+    // total project cost and working capital). A close, case-insensitive
+    // name match updates that row in place; only a genuinely new name adds
+    // a new row.
+    const namesMatch = (a, b) => {
+      const norm = (s) => (s || "").trim().toLowerCase();
+      const na = norm(a), nb = norm(b);
+      return Boolean(na) && na === nb;
+    };
+    const mergeRows = (prev, incoming, buildRow) => {
+      const next = [...prev];
+      for (const item of incoming) {
+        const row = buildRow(item);
+        const existingIndex = next.findIndex((r) => namesMatch(r.name, row.name));
+        if (existingIndex >= 0) {
+          next[existingIndex] = { ...next[existingIndex], ...row, id: next[existingIndex].id };
+        } else {
+          next.push(row);
+        }
+      }
+      return next;
+    };
+
     if (u.entrepreneur) setEntrepreneur((prev) => ({ ...prev, ...u.entrepreneur }));
     if (u.capex) setCapex((prev) => ({ ...prev, ...numify(u.capex) }));
-    if (u.addMachinery?.length) setMachinery((prev) => [...prev, ...u.addMachinery.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
+    if (u.addMachinery?.length)
+      setMachinery((prev) => mergeRows(prev, u.addMachinery, (m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 })));
     if (u.finance) setFinance((prev) => ({ ...prev, ...numify(u.finance) }));
-    if (u.addProducts?.length) setProducts((prev) => [...prev, ...u.addProducts.map((p) => ({ id: uid(), name: p.name || "", qty: Number(p.qty) || 0, rate: Number(p.rate) || 0 }))]);
+    if (u.addProducts?.length)
+      setProducts((prev) => mergeRows(prev, u.addProducts, (p) => ({ id: uid(), name: p.name || "", qty: Number(p.qty) || 0, rate: Number(p.rate) || 0 })));
     if (Array.isArray(u.capacityUtil) && u.capacityUtil.length === 5) setCapacityUtil(u.capacityUtil.map((n) => Number(n) || 0));
-    if (u.addRawMaterials?.length) setRawMaterials((prev) => [...prev, ...u.addRawMaterials.map((m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 }))]);
-    if (u.addWages?.length) setWages((prev) => [...prev, ...u.addWages.map((w) => ({ id: uid(), name: w.name || "", workers: Number(w.workers) || 0, perMonth: Number(w.perMonth) || 0 }))]);
+    if (u.addRawMaterials?.length)
+      setRawMaterials((prev) => mergeRows(prev, u.addRawMaterials, (m) => ({ id: uid(), name: m.name || "", qty: Number(m.qty) || 0, rate: Number(m.rate) || 0 })));
+    if (u.addWages?.length)
+      setWages((prev) => mergeRows(prev, u.addWages, (w) => ({ id: uid(), name: w.name || "", workers: Number(w.workers) || 0, perMonth: Number(w.perMonth) || 0 })));
     if (u.opex) setOpex((prev) => ({ ...prev, ...numify(u.opex) }));
     if (u.admin) setAdmin((prev) => ({ ...prev, ...numify(u.admin) }));
     if (u.depRate != null) setDepRate(Number(u.depRate) || 10);
