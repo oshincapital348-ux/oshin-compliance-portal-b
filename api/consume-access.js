@@ -4,10 +4,12 @@ import { isConsumed, markConsumed } from "./_lib/store.js";
 import { ADMIN_SESSION_MS, CUSTOMER_LINK_MS } from "./_lib/constants.js";
 
 // Called right before the frontend actually generates a PDF/Excel download.
-// Admin sessions pass through freely (not tied to a payment). Paid sessions
-// get marked consumed on their first successful call here — any further
-// call with the same token (a reload, reopening the link, a second report)
-// is rejected, and the customer needs to pay again.
+// Admin sessions pass through freely (not tied to a payment). Paid tokens
+// allow a generous number of downloads (see MAX_DOWNLOADS_PER_TOKEN in
+// store.js) within their validity window — not strictly one, since the
+// chat assistant makes "download, ask for changes, re-download" a normal
+// part of using the tool. Once that cap or the window is hit, the
+// customer needs to pay again.
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 

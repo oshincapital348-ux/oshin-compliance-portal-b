@@ -92,11 +92,19 @@ export async function notify(event) {
 // any later attempt to reuse the same link (reload, reopen, share it again)
 // gets rejected, and the customer has to pay again. Admin sessions are
 // never tracked this way — an admin isn't consuming a payment.
+// A paid token is no longer strictly single-use — the chat assistant makes
+// it completely normal to download once, ask for changes, and want to
+// re-download the corrected version, sometimes more than once. This caps
+// reuse generously (enough for real iteration) rather than blocking after
+// exactly one download, while still meaning a leaked/shared link can't be
+// used indefinitely by strangers — it's capped and time-boxed either way.
+const MAX_DOWNLOADS_PER_TOKEN = 15;
+
 export async function isConsumed(tokenHash) {
   if (!redis) return false; // no storage configured — can't enforce, so allow (fails open)
   try {
-    const val = await redis.get(`oshin:consumed:${tokenHash}`);
-    return !!val;
+    const count = await redis.get(`oshin:consumed:${tokenHash}`);
+    return Number(count || 0) >= MAX_DOWNLOADS_PER_TOKEN;
   } catch (err) {
     console.error("Failed to check consumed status:", err);
     return false;
@@ -106,7 +114,11 @@ export async function isConsumed(tokenHash) {
 export async function markConsumed(tokenHash, ttlSeconds) {
   if (!redis) return;
   try {
-    await redis.set(`oshin:consumed:${tokenHash}`, "1", { ex: ttlSeconds });
+    const key = `oshin:consumed:${tokenHash}`;
+    const count = await redis.incr(key);
+    if (count === 1) {
+      await redis.expire(key, ttlSeconds);
+    }
   } catch (err) {
     console.error("Failed to mark token consumed:", err);
   }

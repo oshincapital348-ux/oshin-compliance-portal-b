@@ -681,7 +681,7 @@ export default function App() {
         }
         setDownloadBlocked(
           data.reason === "already-used"
-            ? "Your previous report has already been generated with this payment. Please pay again to generate a new one."
+            ? "You've reached the download limit for this payment. Please pay again to generate more."
             : data.reason === "wrong-report-type"
             ? `That payment was for the ${data.reportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)"} report, not this one. Please pay again for this report.`
             : "Your access has expired. Please pay again to generate a new report."
