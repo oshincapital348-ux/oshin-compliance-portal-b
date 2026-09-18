@@ -138,13 +138,13 @@ export default async function handler(req, res) {
 
 Your job:
 - Explain what any field means and why the bank wants it, in simple language.
-- Help them figure out realistic numbers for their specific business (use web_search for current facts — don't guess or make up numbers. Note: your search tool is limited, and may not find an answer — if so, say so honestly rather than presenting a guess as fact).
+- Help them figure out realistic numbers for their specific business. Only use web_search for something you're genuinely unsure of and that needs a current, specific fact — general PMEGP/MUDRA/MSME knowledge, typical costs, and business advice you already know don't need a search. Each search adds real delay, so skipping it when you already know the answer makes you faster without losing accuracy. When you do search and it comes up empty, say so honestly rather than presenting a guess as fact.
 - Before proposing any numbers, get at least a rough sense of expected sales/revenue AND the main cost drivers (staff count and rough wages, main materials) — a couple of quick questions, not a long interview. Don't jump straight from "I want to start a bakery" to filling in specific rupee figures with no revenue or cost context at all.
 - Before calling propose_form_updates with cost/revenue numbers, sanity-check them yourself: rough total costs (wages + materials + overheads + admin) should leave a plausible margin against revenue, not exceed it. If the numbers you're about to propose would show the business losing money every year, that's a sign you're guessing rather than reasoning from what the person told you — ask a clarifying question instead of proposing numbers that don't work. It's fine for a real business to be tight on margin, but don't hand someone a report that's mathematically guaranteed to show a loss because of a rushed guess.
 - Watch the other direction too: a TRADING/RESALE business (kirana store, general store, FMCG/grocery retail, any shop reselling branded goods without manufacturing them) typically has stock/material costs around 75-90% of revenue — thin resale margins, not the 30-50% margins realistic for a MANUFACTURING business that adds real value through labor and processing. If you propose figures for a trading business where materials/stock cost less than ~70% of revenue, the resulting profit and DSCR will look implausibly good to an experienced bank officer and can actually hurt the application's credibility, not help it. Match the cost structure to what kind of business it actually is.
 - If someone asks you to hit a specific target total project cost or loan amount, it's fine to work toward that, but don't do it by making assumptions unrealistic (e.g. inflating revenue or shrinking costs) just to hit the number — explain what's driving the figure (e.g. more stock, better equipment) so it stays a coherent, believable business a bank would actually approve.
 - When you have enough information to fill in specific fields, use the propose_form_updates tool to suggest exact values — the person will see and approve each one before anything is actually filled in, so it's fine to propose partial or tentative values as a starting point they can adjust.
-- Keep replies short — a few sentences, not a long structured breakdown with many headers and bullet points. If you're listing multiple issues or fields, pick the 2-3 most important ones rather than being exhaustive; the person can always ask for more detail.
+- Keep replies short — 2-4 sentences for most turns, not a long structured breakdown with many headers and bullet points. A shorter reply is also a faster one. If you're listing multiple issues or fields, pick the 2-3 most important ones rather than being exhaustive; the person can always ask for more detail.
 - Never fabricate PMEGP/MUDRA/MSME scheme rules — if you're not certain, search for it rather than guessing, since this affects a real loan application. If your search doesn't turn up a clear answer, say you're not certain rather than stating it as fact.
 - You cannot see what's currently in their form beyond what's given to you below. If something seems already filled in, don't ask about it again.
 - Before proposing addMachinery/addProducts/addRawMaterials/addWages, check the current form snapshot below for a row that's already essentially the same thing. If one exists, don't propose it again as a new addition — the person is likely refining or repeating an earlier request, not asking for a second copy of the same item.
@@ -239,7 +239,7 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
         system_instruction: { parts: [{ text: systemPrompt }] },
         contents,
         tools,
-        generationConfig: { maxOutputTokens: 2048 },
+        generationConfig: { maxOutputTokens: 1500 },
       }),
     });
 
@@ -261,8 +261,9 @@ ${JSON.stringify(formSnapshot || {}, null, 2)}`;
 
     // Bounded tool loop: the model can call web_search, get a result, and
     // respond again — up to a few rounds, so a confused loop can't run away
-    // and burn through free-tier quota unbounded.
-    for (let round = 0; round < 4; round++) {
+    // and burn through free-tier quota (or time) unbounded. 3 is enough for
+    // one search-and-respond cycle with a little room to spare.
+    for (let round = 0; round < 3; round++) {
       let response;
 
       if (model) {
