@@ -102,9 +102,9 @@ export async function sendAdminClaimAlert({ utr, contact, amount, reportType }) 
             <p>Check your bank app to confirm this actually landed before approving in the admin panel.</p>
             <table style="width:100%; border-collapse: collapse; margin: 16px 0;">
               <tr><td style="padding:6px 0; color:#666;">Report</td><td style="padding:6px 0; font-weight:bold;">${reportLabel}</td></tr>
-              <tr><td style="padding:6px 0; color:#666;">Contact</td><td style="padding:6px 0; font-weight:bold;">${contact}</td></tr>
-              <tr><td style="padding:6px 0; color:#666;">UTR</td><td style="padding:6px 0; font-weight:bold;">${utr}</td></tr>
-              <tr><td style="padding:6px 0; color:#666;">Amount claimed</td><td style="padding:6px 0; font-weight:bold;">₹${amount || "—"}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">Contact</td><td style="padding:6px 0; font-weight:bold;">${esc(contact)}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">UTR</td><td style="padding:6px 0; font-weight:bold;">${esc(utr)}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">Amount claimed</td><td style="padding:6px 0; font-weight:bold;">₹${esc(amount || "—")}</td></tr>
             </table>
             <p>
               <a href="${quickApproveUrl}" style="background:#c9a24b;color:#1a1a1a;padding:10px 18px;text-decoration:none;border-radius:4px;font-weight:bold;display:inline-block;">
@@ -123,6 +123,95 @@ export async function sendAdminClaimAlert({ utr, contact, amount, reportType }) 
     return { sent: true };
   } catch (err) {
     console.error("Admin alert email error:", err);
+    return { sent: false, reason: "network-error" };
+  }
+}
+
+export async function sendPartnerApprovalEmail({ to, name, code }) {
+  if (!process.env.RESEND_API_KEY) return { sent: false, reason: "not-configured" };
+  const from = process.env.RESEND_FROM_EMAIL || "Oshin Capital <support@oshin-capital.com>";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from,
+        to,
+        subject: "You're approved as an Oshin Capital partner",
+        html: `
+          <div style="font-family: Georgia, 'Times New Roman', serif; max-width: 480px; margin: 0 auto; color: #1a1a1a;">
+            <h2 style="margin-bottom: 4px;">Welcome, ${esc(name) || "partner"}!</h2>
+            <p>You've been approved as an Oshin Capital partner — you now get every report at 60% of the listed price.</p>
+            <p>Your login code:</p>
+            <p style="background:#f5eddc;padding:14px 18px;border-radius:4px;font-weight:bold;font-size:18px;letter-spacing:1px;">${code}</p>
+            <p>Use it at <a href="https://compliance.oshin-capital.com">compliance.oshin-capital.com</a> under "Partner login" to access your dashboard.</p>
+            <p style="font-size: 13px; color: #666;">Keep this code private — anyone with it can generate reports at your partner rate. If you have any trouble, reply to this email or WhatsApp us at +91 95039 45982.</p>
+          </div>
+        `,
+      }),
+    });
+    if (!res.ok) {
+      console.error("Partner approval email failed:", res.status, await res.text().catch(() => ""));
+      return { sent: false, reason: "send-failed" };
+    }
+    return { sent: true };
+  } catch (err) {
+    console.error("Partner approval email error:", err);
+    return { sent: false, reason: "network-error" };
+  }
+}
+
+// Customer-supplied text (names, business names, etc.) ends up inside emails
+// sent to you, so it's escaped — otherwise someone could slip markup/links
+// into your inbox through a form field.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Tells YOU (the super admin) the moment someone applies to become a partner,
+// with a button that opens the admin login and, once you're in, the Partners
+// section where you approve or reject.
+export async function sendAdminPartnerApplicationAlert({ name, business, email, mobile }) {
+  if (!process.env.RESEND_API_KEY) return { sent: false, reason: "not-configured" };
+
+  const to = process.env.ADMIN_ALERT_EMAIL || "oshincapital348@gmail.com";
+  const from = process.env.RESEND_FROM_EMAIL || "Oshin Capital <support@oshin-capital.com>";
+
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from,
+        to,
+        subject: `New partner application — ${String(business || "").slice(0, 80)}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #1a1a1a;">
+            <h2 style="margin-bottom: 4px;">Someone wants to become a partner</h2>
+            <p>Review the details below, then approve or reject from your admin panel.</p>
+            <table style="width:100%; border-collapse: collapse; margin: 16px 0;">
+              <tr><td style="padding:6px 0; color:#666;">Name</td><td style="padding:6px 0; font-weight:bold;">${esc(name)}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">Business</td><td style="padding:6px 0; font-weight:bold;">${esc(business)}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">Email</td><td style="padding:6px 0; font-weight:bold;">${esc(email)}</td></tr>
+              <tr><td style="padding:6px 0; color:#666;">Mobile</td><td style="padding:6px 0; font-weight:bold;">${esc(mobile)}</td></tr>
+            </table>
+            <p>
+              <a href="https://compliance.oshin-capital.com/?partners=1" style="background:#c9a24b;color:#1a1a1a;padding:10px 18px;text-decoration:none;border-radius:4px;font-weight:bold;display:inline-block;">
+                Review &amp; approve
+              </a>
+            </p>
+            <p style="font-size: 12px; color: #999; margin-top: 8px;">Opens your admin login — after entering your admin code, scroll to the Partners section.</p>
+          </div>
+        `,
+      }),
+    });
+    if (!res.ok) {
+      console.error("Partner application alert failed:", res.status, await res.text().catch(() => ""));
+      return { sent: false, reason: "send-failed" };
+    }
+    return { sent: true };
+  } catch (err) {
+    console.error("Partner application alert error:", err);
     return { sent: false, reason: "network-error" };
   }
 }

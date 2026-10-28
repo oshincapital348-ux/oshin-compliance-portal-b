@@ -27,7 +27,7 @@ const COUNT_KEY = "oshin:reportCount";
 const REVENUE_KEY = "oshin:revenueRupees";
 const MAX_STORED = 200; // keep the list bounded — recent history, not infinite
 
-export async function recordTransaction({ method, contact, utr, amount, status, reportType }) {
+export async function recordTransaction({ method, contact, utr, amount, status, reportType, partnerCode }) {
   if (!redis) return; // storage not configured — silently skip
 
   const entry = {
@@ -37,6 +37,7 @@ export async function recordTransaction({ method, contact, utr, amount, status, 
     amount: amount || null,
     status: status || "completed",
     reportType: reportType === "cma" ? "cma" : reportType === "dpr" ? "dpr" : null,
+    partnerCode: partnerCode || null,
     at: new Date().toISOString(),
   };
 
@@ -232,4 +233,122 @@ export function getClientIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.length > 0) return forwarded.split(",")[0].trim();
   return req.socket?.remoteAddress || "unknown";
+}
+
+// --- Partner program ---
+// Anyone can apply; only the super admin can approve. An approved partner
+// gets a unique login code (mailed to them) and buys reports at 60% of the
+// normal price.
+const PARTNER_APPS_LIST_KEY = "oshin:partnerApps";
+const MAX_PARTNER_APPS = 200;
+
+export async function savePartnerApplication(app) {
+  if (!redis) return null;
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const entry = { id, ...app, status: "pending", appliedAt: new Date().toISOString() };
+  try {
+    await redis.lpush(PARTNER_APPS_LIST_KEY, JSON.stringify(entry));
+    await redis.ltrim(PARTNER_APPS_LIST_KEY, 0, MAX_PARTNER_APPS - 1);
+    return entry;
+  } catch (err) {
+    console.error("Failed to save partner application:", err);
+    return null;
+  }
+}
+
+export async function listPartnerApplications(limit = 50) {
+  if (!redis) return [];
+  try {
+    const raw = await redis.lrange(PARTNER_APPS_LIST_KEY, 0, limit - 1);
+    return raw.map((r) => (typeof r === "string" ? JSON.parse(r) : r));
+  } catch (err) {
+    console.error("Failed to list partner applications:", err);
+    return [];
+  }
+}
+
+// Applications live in a small capped list, so changing one's status just
+// rewrites that list with the entry updated (order preserved).
+export async function updatePartnerApplicationStatus(id, status) {
+  if (!redis) return;
+  try {
+    const raw = await redis.lrange(PARTNER_APPS_LIST_KEY, 0, MAX_PARTNER_APPS - 1);
+    const apps = raw.map((r) => (typeof r === "string" ? JSON.parse(r) : r));
+    const updated = apps.map((a) => (a.id === id ? { ...a, status } : a));
+    await redis.del(PARTNER_APPS_LIST_KEY);
+    if (updated.length > 0) {
+      await redis.lpush(PARTNER_APPS_LIST_KEY, ...updated.reverse().map((a) => JSON.stringify(a)));
+    }
+  } catch (err) {
+    console.error("Failed to update partner application status:", err);
+  }
+}
+
+function generatePartnerCode() {
+  return `PARTNER-${Math.random().toString(36).slice(2, 6).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+}
+
+export async function createPartner({ name, business, email, mobile }) {
+  if (!redis) return null;
+  const code = generatePartnerCode();
+  const partner = { code, name, business, email, mobile, active: true, approvedAt: new Date().toISOString() };
+  try {
+    await redis.set(`oshin:partner:${code}`, JSON.stringify(partner));
+    return partner;
+  } catch (err) {
+    console.error("Failed to create partner:", err);
+    return null;
+  }
+}
+
+export async function getPartner(code) {
+  if (!redis || !code) return null;
+  try {
+    const raw = await redis.get(`oshin:partner:${code}`);
+    if (!raw) return null;
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch (err) {
+    console.error("Failed to read partner:", err);
+    return null;
+  }
+}
+
+export async function setPartnerActive(code, active) {
+  const partner = await getPartner(code);
+  if (!partner || !redis) return;
+  try {
+    await redis.set(`oshin:partner:${code}`, JSON.stringify({ ...partner, active }));
+  } catch (err) {
+    console.error("Failed to update partner active status:", err);
+  }
+}
+
+// Approved partner codes are tracked in one small index list (the record
+// itself lives at its own key and stays the source of truth for "active").
+const PARTNER_INDEX_KEY = "oshin:partnerIndex";
+
+export async function indexPartnerCode(code) {
+  if (!redis) return;
+  try {
+    await redis.lpush(PARTNER_INDEX_KEY, code);
+  } catch (err) {
+    console.error("Failed to index partner code:", err);
+  }
+}
+
+export async function listPartners() {
+  if (!redis) return [];
+  try {
+    const codes = await redis.lrange(PARTNER_INDEX_KEY, 0, 500);
+    const partners = await Promise.all(codes.map((c) => getPartner(c)));
+    return partners.filter(Boolean);
+  } catch (err) {
+    console.error("Failed to list partners:", err);
+    return [];
+  }
+}
+
+export async function getPartnerHistory(code, limit = 50) {
+  const stats = await getStats(200);
+  return (stats.recent || []).filter((tx) => tx.partnerCode === code).slice(0, limit);
 }

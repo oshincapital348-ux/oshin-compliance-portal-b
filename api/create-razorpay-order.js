@@ -1,6 +1,8 @@
 import Razorpay from "razorpay";
-import { computeFee, applyRepeatDiscount } from "./_lib/pricing.js";
-import { getContactPaidHistory, checkRateLimit, getClientIp } from "./_lib/store.js";
+import { computeFee, applyRepeatDiscount, applyPartnerRate } from "./_lib/pricing.js";
+import { getContactPaidHistory, getPartner, checkRateLimit, getClientIp } from "./_lib/store.js";
+import { verifyAccessToken } from "./_lib/token.js";
+import { PARTNER_SESSION_MS } from "./_lib/constants.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -23,13 +25,28 @@ export default async function handler(req, res) {
   const projectCost = Number(req.body?.projectCost) || 0;
   const reportType = req.body?.reportType === "cma" ? "cma" : "dpr";
   const contact = typeof req.body?.contact === "string" ? req.body.contact : "";
+  const partnerToken = typeof req.body?.partnerToken === "string" ? req.body.partnerToken : "";
 
-  // A customer who already paid for the other report type on this contact
-  // gets the difference credited — computed server-side from real payment
-  // history, never trusted from the browser, same principle as the tier fee.
   const normalFee = computeFee(projectCost);
-  const history = contact ? await getContactPaidHistory(contact) : null;
-  const { fee: feeRupees } = applyRepeatDiscount(normalFee, reportType, history);
+
+  // An ACTIVE partner gets the 60% rate instead of the normal price and the
+  // repeat-customer discount — verified server-side from the signed token and
+  // the live partner record, same principle as every other price here.
+  let feeRupees, partnerCode = null;
+  const partnerPayload = partnerToken ? verifyAccessToken(partnerToken, PARTNER_SESSION_MS) : null;
+  if (partnerPayload?.mode === "partner") {
+    const partnerRecord = await getPartner(partnerPayload.partnerCode);
+    if (partnerRecord?.active) {
+      feeRupees = applyPartnerRate(normalFee);
+      partnerCode = partnerRecord.code;
+    }
+  }
+  if (feeRupees === undefined) {
+    // A customer who already paid for the other report type on this contact
+    // gets the difference credited — computed server-side from real payment history.
+    const history = contact ? await getContactPaidHistory(contact) : null;
+    feeRupees = applyRepeatDiscount(normalFee, reportType, history).fee;
+  }
   const feePaise = Math.round(feeRupees * 100);
 
   try {
@@ -42,7 +59,7 @@ export default async function handler(req, res) {
       amount: feePaise,
       currency: "INR",
       receipt: `report_${Date.now()}`,
-      notes: { projectCost: String(projectCost), reportType, contact: contact || "" },
+      notes: { projectCost: String(projectCost), reportType, contact: contact || "", partnerCode: partnerCode || "" },
     });
 
     res.status(200).json({

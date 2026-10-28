@@ -53,3 +53,12 @@ export function applyRepeatDiscount(normalFee, reportType, contactHistory) {
     },
   };
 }
+
+// Approved partners buy every report at 60% of the normal price. This
+// REPLACES the repeat-customer discount rather than stacking with it —
+// simpler math, no odd edge cases.
+const PARTNER_RATE = 0.6;
+
+export function applyPartnerRate(normalFee) {
+  return Math.round(normalFee * PARTNER_RATE);
+}

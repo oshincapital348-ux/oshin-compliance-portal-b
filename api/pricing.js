@@ -1,5 +1,7 @@
-import { computeFee, applyRepeatDiscount, getTiers } from "./_lib/pricing.js";
-import { getContactPaidHistory } from "./_lib/store.js";
+import { computeFee, applyRepeatDiscount, applyPartnerRate, getTiers } from "./_lib/pricing.js";
+import { getContactPaidHistory, getPartner } from "./_lib/store.js";
+import { verifyAccessToken } from "./_lib/token.js";
+import { PARTNER_SESSION_MS } from "./_lib/constants.js";
 
 // Merges what used to be three separate endpoints (get-fee, get-payment-
 // details, get-price-list) into one — Vercel's free Hobby plan caps a
@@ -22,10 +24,27 @@ export default async function handler(req, res) {
   const projectCost = Number(req.query.projectCost) || 0;
   const reportType = req.query.reportType === "cma" ? "cma" : "dpr";
   const contact = typeof req.query.contact === "string" ? req.query.contact : "";
+  const partnerToken = typeof req.query.partnerToken === "string" ? req.query.partnerToken : "";
 
   const normalFee = computeFee(projectCost);
-  const history = contact ? await getContactPaidHistory(contact) : null;
-  const { fee, discount } = applyRepeatDiscount(normalFee, reportType, history);
+
+  // A valid, ACTIVE partner gets the 60% rate instead of the tiered price and
+  // repeat-customer discount — verified server-side from the signed token and
+  // the live partner record, never from a browser claim.
+  let fee, discount, partner = null;
+  const partnerPayload = partnerToken ? verifyAccessToken(partnerToken, PARTNER_SESSION_MS) : null;
+  if (partnerPayload?.mode === "partner") {
+    const partnerRecord = await getPartner(partnerPayload.partnerCode);
+    if (partnerRecord?.active) {
+      partner = { name: partnerRecord.name, business: partnerRecord.business };
+      fee = applyPartnerRate(normalFee);
+      discount = null;
+    }
+  }
+  if (fee === undefined) {
+    const history = contact ? await getContactPaidHistory(contact) : null;
+    ({ fee, discount } = applyRepeatDiscount(normalFee, reportType, history));
+  }
 
   if (mode === "qr") {
     const upiId = process.env.UPI_ID;
@@ -33,7 +52,7 @@ export default async function handler(req, res) {
     if (!upiId) {
       return res.status(500).json({ error: "Payment is not configured yet. Set UPI_ID in environment variables." });
     }
-    return res.status(200).json({ upiId, amount: fee, normalFee, discount, payeeName });
+    return res.status(200).json({ upiId, amount: fee, normalFee, discount, partner, payeeName });
   }
 
   // mode === "fee"
@@ -45,5 +64,5 @@ export default async function handler(req, res) {
   // bank OTP). The moment you swap in live keys and redeploy, this flips
   // to true automatically — no other code change needed.
   const razorpayLive = Boolean(process.env.RAZORPAY_KEY_ID?.startsWith("rzp_live_"));
-  res.status(200).json({ fee, normalFee, discount, projectCost, razorpayLive });
+  res.status(200).json({ fee, normalFee, discount, partner, projectCost, razorpayLive });
 }

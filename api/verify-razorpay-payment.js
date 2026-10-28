@@ -31,6 +31,7 @@ export default async function handler(req, res) {
   let projectCost = null;
   let reportType = "dpr";
   let contact = "";
+  let partnerCode = null;
   try {
     const razorpay = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
@@ -41,6 +42,7 @@ export default async function handler(req, res) {
     projectCost = order.notes?.projectCost || null;
     reportType = order.notes?.reportType === "cma" ? "cma" : "dpr";
     contact = order.notes?.contact || "";
+    partnerCode = order.notes?.partnerCode || null;
   } catch (err) {
     console.error("Could not fetch order for amount record:", err);
   }
@@ -56,7 +58,7 @@ export default async function handler(req, res) {
     paymentId: razorpay_payment_id,
   });
 
-  await recordTransaction({ method: "razorpay", utr: razorpay_payment_id, amount: amountRupees, status: "completed", reportType });
+  await recordTransaction({ method: "razorpay", utr: razorpay_payment_id, amount: amountRupees, status: "completed", reportType, partnerCode });
   await recordContactPaid(contact, reportType, amountRupees);
   await notify({
     event: "payment_completed",

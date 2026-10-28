@@ -163,7 +163,10 @@ export default function App() {
   const [quickApproveData, setQuickApproveData] = useState(null);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("quickApprove") !== "1") return;
+    // Two kinds of admin deep-links: a payment "quick approve" link, or the
+    // partner-application alert's "Review & approve" link (?partners=1).
+    const isPartnersLink = params.get("partners") === "1";
+    if (params.get("quickApprove") !== "1" && !isPartnersLink) return;
 
     setQuickApproveData({
       utr: params.get("utr") || "",
@@ -177,6 +180,52 @@ export default function App() {
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
+  // Partner session — logged in separately from admin/customer access.
+  // While logged in, every report generated gets the 60% partner rate
+  // automatically (enforced server-side from this signed token).
+  const [partnerToken, setPartnerToken] = useState(null);
+  const [partnerInfo, setPartnerInfo] = useState(null); // { name, business, code }
+  const [showPartnerDashboard, setShowPartnerDashboard] = useState(false);
+
+  const handlePartnerLogin = (token, partner) => {
+    setPartnerToken(token);
+    setPartnerInfo(partner);
+    try {
+      localStorage.setItem("oshinPartner", JSON.stringify({ token }));
+    } catch {}
+  };
+
+  const handlePartnerLogout = () => {
+    setPartnerToken(null);
+    setPartnerInfo(null);
+    setShowPartnerDashboard(false);
+    try {
+      localStorage.removeItem("oshinPartner");
+    } catch {}
+  };
+
+  useEffect(() => {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem("oshinPartner") || "null");
+    } catch {}
+    if (!saved?.token) return;
+    fetch("/api/partners", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "session", token: saved.token }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok) {
+          setPartnerToken(saved.token);
+          setPartnerInfo(data.partner);
+        } else {
+          localStorage.removeItem("oshinPartner"); // stale/expired — clear it
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Top-level: which kind of report is being generated. "dpr" is the
   // proposed-project term-loan report (PMEGP/MUDRA/MSME — same engine,
@@ -1078,6 +1127,16 @@ export default function App() {
             >
               <Download size={16} /> Download report (.xlsx)
             </button>
+            {partnerInfo && (
+              <button
+                onClick={() => setShowPartnerDashboard(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded text-xs font-medium border"
+                style={{ borderColor: GOLD, color: GOLD }}
+                title="Every report you generate now gets the 60% partner rate"
+              >
+                🤝 Partner: {partnerInfo.business} — 40% off
+              </button>
+            )}
             {access === "locked" && (
               <button
                 onClick={() => { setPendingDownload(null); setPayModalOpen(true); }}
@@ -1487,6 +1546,15 @@ export default function App() {
 
       {showPriceList && <PriceListModal onClose={() => setShowPriceList(false)} />}
 
+      {showPartnerDashboard && partnerInfo && (
+        <PartnerDashboardModal
+          partnerInfo={partnerInfo}
+          partnerToken={partnerToken}
+          onClose={() => setShowPartnerDashboard(false)}
+          onLogout={handlePartnerLogout}
+        />
+      )}
+
       <ChatWidget reportType={reportType} formSnapshot={chatFormSnapshot} onApplyUpdates={applyFormUpdates} />
 
       {payModalOpen && (
@@ -1500,6 +1568,8 @@ export default function App() {
               reportType={reportType}
               projectCost={reportType === "cma" ? (cmaCalc.periods[cmaCalc.periods.length - 1]?.totalSales || 0) : calc.totalProjectCost}
               customerContact={(reportType === "cma" ? (cmaEntrepreneur.email || cmaEntrepreneur.mobile) : (entrepreneur.email || entrepreneur.mobile)) || ""}
+              partnerToken={partnerToken}
+              onPartnerLogin={handlePartnerLogin}
               onClose={() => { setPayModalOpen(false); setPendingDownload(null); }}
               onShowPricing={() => setShowPriceList(true)}
               quickApproveData={quickApproveData}
@@ -1794,14 +1864,197 @@ function PriceListModal({ onClose }) {
   );
 }
 
-function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing, quickApproveData = null, customerContact = "" }) {
-  const [mode, setMode] = useState(quickApproveData ? "admin" : "choose"); // "choose" | "qr" | "admin"
+// A logged-in partner's home base: confirmation their 60% rate is active,
+// plus their own order history and total spent (the same transaction log the
+// admin sees, filtered to just their purchases).
+function PartnerDashboardModal({ partnerInfo, partnerToken, onClose, onLogout }) {
+  const [history, setHistory] = useState(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/partners", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${partnerToken}` },
+      body: JSON.stringify({ action: "history" }),
+    })
+      .then((r) => r.json())
+      .then((data) => (data.ok ? setHistory(data.history || []) : setError(true)))
+      .catch(() => setError(true));
+  }, [partnerToken]);
+
+  const totalSpent = (history || []).reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0);
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center p-4 z-50 no-print" style={{ background: "rgba(15,15,20,0.55)" }}>
+      <div className="rounded-lg p-6 w-full max-w-lg relative" style={{ background: "#fff", maxHeight: "90vh", overflowY: "auto" }}>
+        <button onClick={onClose} className="absolute top-4 right-4 text-lg" style={{ color: MUTED }} aria-label="Close">×</button>
+        <h2 style={{ fontFamily: "Georgia, 'Times New Roman', serif" }} className="text-xl mb-1">Partner dashboard</h2>
+        <p className="text-sm mb-4" style={{ color: MUTED }}>{partnerInfo.name} · {partnerInfo.business}</p>
+
+        <div className="p-3 rounded mb-4 text-sm" style={{ background: GOLD_L }}>
+          ✓ Your partner rate is active — every report you generate is automatically <b>40% off</b> (you pay 60% of the listed price).
+          Just fill in your customer's details and generate the report as usual.
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="p-3 rounded border" style={{ borderColor: LINE }}>
+            <p className="text-xs" style={{ color: MUTED }}>Reports generated</p>
+            <p className="text-xl font-medium">{history ? history.length : "…"}</p>
+          </div>
+          <div className="p-3 rounded border" style={{ borderColor: LINE }}>
+            <p className="text-xs" style={{ color: MUTED }}>Total spent</p>
+            <p className="text-xl font-medium">{history ? `₹${totalSpent.toLocaleString("en-IN")}` : "…"}</p>
+          </div>
+        </div>
+
+        <p className="text-xs uppercase tracking-wide mb-2" style={{ color: MUTED }}>Order history</p>
+        {error && <p className="text-sm mb-3" style={{ color: MUTED }}>Couldn't load your history right now — please try again in a moment.</p>}
+        {history && history.length === 0 && <p className="text-sm mb-3" style={{ color: MUTED }}>No orders yet. Your first report will show up here.</p>}
+        {history && history.length > 0 && (
+          <div className="border rounded overflow-hidden mb-4" style={{ borderColor: LINE }}>
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ background: GOLD_L }}>
+                  <th className="text-left py-2 px-3" style={{ color: MUTED }}>Date</th>
+                  <th className="text-left py-2 px-3" style={{ color: MUTED }}>Report</th>
+                  <th className="text-right py-2 px-3" style={{ color: MUTED }}>Paid</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((tx, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${LINE}` }}>
+                    <td className="py-2 px-3">{new Date(tx.at).toLocaleDateString("en-IN")}</td>
+                    <td className="py-2 px-3">{tx.reportType === "cma" ? "CMA" : "DPR"}</td>
+                    <td className="py-2 px-3 text-right">₹{(Number(tx.amount) || 0).toLocaleString("en-IN")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded text-sm font-medium" style={{ background: GOLD, color: INK }}>Back to the tool</button>
+          <button onClick={onLogout} className="px-4 py-2.5 rounded text-sm font-medium border" style={{ borderColor: LINE, color: MUTED }}>Log out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Super-admin-only: review partner applications, approve/reject them, and
+// switch existing partners on or off. Self-contained so it can drop into the
+// admin panel without touching its other state.
+function PartnerAdminSection({ adminToken }) {
+  const [apps, setApps] = useState(null);
+  const [partners, setPartners] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [note, setNote] = useState("");
+
+  const call = async (body) => {
+    const res = await fetch("/api/partners", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify(body),
+    });
+    return res.json();
+  };
+
+  const load = async () => {
+    setLoading(true);
+    setNote("");
+    try {
+      const [a, p] = await Promise.all([call({ action: "list-applications" }), call({ action: "list-partners" })]);
+      setApps(a.ok ? a.apps : []);
+      setPartners(p.ok ? p.partners : []);
+    } catch {
+      setNote("Couldn't load partner data.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load on open, so new applications are right there when you log in —
+  // no need to remember to click "Load partners".
+  useEffect(() => {
+    load();
+  }, []);
+
+  const approve = async (a) => {
+    const data = await call({ action: "approve", id: a.id, name: a.name, business: a.business, email: a.email, mobile: a.mobile });
+    setNote(
+      data.ok
+        ? `Approved ${a.business}. Code: ${data.code} — ${data.emailSent ? "emailed to them." : "email NOT sent (check RESEND_API_KEY) — send them this code yourself."}`
+        : data.error || "Could not approve."
+    );
+    load();
+  };
+  const reject = async (a) => {
+    await call({ action: "reject", id: a.id });
+    load();
+  };
+  const toggle = async (p) => {
+    await call({ action: "set-active", code: p.code, active: !p.active });
+    load();
+  };
+
+  const pending = (apps || []).filter((a) => a.status === "pending");
+
+  return (
+    <div style={{ borderTop: `1px solid ${LINE}` }} className="pt-4 mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-xs uppercase tracking-wide" style={{ color: MUTED }}>
+          Partners{apps ? ` · ${pending.length} pending` : ""}
+        </p>
+        <button onClick={load} disabled={loading} className="text-xs underline" style={{ color: INK }}>
+          {loading ? "Loading…" : apps ? "Refresh" : "Load partners"}
+        </button>
+      </div>
+      {note && <p className="text-xs mb-2 p-2 rounded break-words" style={{ background: GOLD_L }}>{note}</p>}
+
+      {apps && pending.length === 0 && <p className="text-xs mb-2" style={{ color: MUTED }}>No pending applications.</p>}
+      {pending.map((a) => (
+        <div key={a.id} className="text-xs p-2 rounded mb-2" style={{ background: "#fafafa", border: `1px solid ${LINE}` }}>
+          <div className="font-medium">{a.business} — {a.name}</div>
+          <div style={{ color: MUTED }}>{a.email} · {a.mobile}</div>
+          <div className="flex gap-3 mt-1">
+            <button onClick={() => approve(a)} className="underline font-medium" style={{ color: INK }}>Approve</button>
+            <button onClick={() => reject(a)} className="underline" style={{ color: "#B3261E" }}>Reject</button>
+          </div>
+        </div>
+      ))}
+
+      {partners && partners.length > 0 && (
+        <>
+          <p className="text-xs uppercase tracking-wide mt-3 mb-1" style={{ color: MUTED }}>Approved partners</p>
+          {partners.map((p) => (
+            <div key={p.code} className="text-xs p-2 rounded mb-1 flex items-center justify-between" style={{ background: "#fafafa", border: `1px solid ${LINE}` }}>
+              <div>
+                <span className="font-medium">{p.business}</span> <span style={{ color: MUTED }}>· {p.code}</span>
+                {!p.active && <span style={{ color: "#B3261E" }}> · deactivated</span>}
+              </div>
+              <button onClick={() => toggle(p)} className="underline" style={{ color: INK }}>{p.active ? "Deactivate" : "Reactivate"}</button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onShowPricing, quickApproveData = null, customerContact = "", partnerToken = null, onPartnerLogin }) {
+  const [mode, setMode] = useState(quickApproveData ? "admin" : "choose"); // "choose" | "qr" | "admin" | "partner-login" | "partner-apply"
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const [utr, setUtr] = useState("");
   const [contact, setContact] = useState("");
   const [upiSubmitted, setUpiSubmitted] = useState(false);
+
+  // Partner login (code emailed on approval) and partner application forms.
+  const [partnerCodeInput, setPartnerCodeInput] = useState("");
+  const [applyForm, setApplyForm] = useState({ name: "", business: "", email: "", mobile: "" });
+  const [applySubmitted, setApplySubmitted] = useState(false);
 
   const [adminCode, setAdminCode] = useState("");
   const [adminToken, setAdminToken] = useState(null);
@@ -1831,19 +2084,22 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
   // (false while your account's website review is pending, or if test
   // keys are still in place) — drives whether "Pay online" is shown at all.
   const [razorpayLive, setRazorpayLive] = useState(true);
+  // Set when a logged-in partner's 60% rate is what's being shown/charged.
+  const [partnerRate, setPartnerRate] = useState(null);
   useEffect(() => {
     setFeeLoading(true);
-    const params = new URLSearchParams({ mode: "fee", projectCost, reportType, contact: customerContact || "" });
+    const params = new URLSearchParams({ mode: "fee", projectCost, reportType, contact: customerContact || "", partnerToken: partnerToken || "" });
     fetch(`/api/pricing?${params}`)
       .then((r) => r.json())
       .then((data) => {
         setFee(data.fee);
         setDiscount(data.discount || null);
+        setPartnerRate(data.partner || null);
         setRazorpayLive(Boolean(data.razorpayLive));
       })
       .catch(() => setFee(null))
       .finally(() => setFeeLoading(false));
-  }, [projectCost, reportType, customerContact]);
+  }, [projectCost, reportType, customerContact, partnerToken]);
 
   // ---- Razorpay: opens in this same window, verifies server-side via
   // signature, and unlocks the software immediately on success — no link
@@ -1856,7 +2112,7 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
       const orderRes = await fetch("/api/create-razorpay-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectCost, reportType, contact: customerContact || "" }),
+        body: JSON.stringify({ projectCost, reportType, contact: customerContact || "", partnerToken: partnerToken || "" }),
       });
       if (!orderRes.ok) {
         const errData = await orderRes.json().catch(() => ({}));
@@ -1932,7 +2188,7 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
     setBusy(true);
     setError("");
     try {
-      const params = new URLSearchParams({ mode: "qr", projectCost, reportType, contact: customerContact || "" });
+      const params = new URLSearchParams({ mode: "qr", projectCost, reportType, contact: customerContact || "", partnerToken: partnerToken || "" });
       const res = await fetch(`/api/pricing?${params}`);
       if (!res.ok) throw new Error("Could not load payment details.");
       const { upiId, amount, payeeName } = await res.json();
@@ -1974,6 +2230,45 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
   };
 
   // ---- Super admin: code is checked server-side, never in this file ----
+  const submitPartnerLogin = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/partners", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "login", code: partnerCodeInput.trim() }),
+      });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Could not log in.");
+      onPartnerLogin(data.accessToken, data.partner);
+      onClose && onClose();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitPartnerApplication = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/partners", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "apply", ...applyForm }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || "Could not submit. Please try again.");
+      setApplySubmitted(true);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submitAdmin = async () => {
     setBusy(true);
     setError("");
@@ -2067,13 +2362,18 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
           )}
         </p>
 
-        {discount && (
+        {partnerRate && (
+          <p className="text-xs mb-6 px-3 py-2 rounded" style={{ background: GOLD_L, color: TEXT }}>
+            🤝 Partner rate applied for {partnerRate.business} — you're paying 60% of the listed price.
+          </p>
+        )}
+        {!partnerRate && discount && (
           <p className="text-xs mb-6 px-3 py-2 rounded" style={{ background: GOLD_L, color: TEXT }}>
             ✓ You've already paid ₹{discount.otherAmountPaid} for your {discount.otherReportType === "cma" ? "CMA / Working Capital" : "Project Report (DPR)"} —
             we've credited that, saving you ₹{discount.savedAmount} on this report.
           </p>
         )}
-        {!discount && <div className="mb-6" />}
+        {!partnerRate && !discount && <div className="mb-6" />}
 
         {error && <p className="text-xs mb-4" style={{ color: "#B3261E" }}>{error}</p>}
 
@@ -2099,6 +2399,16 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
                   {busy ? "Loading…" : "Scan QR to pay (UPI, no gateway fee)"}
                 </button>
               </>
+            )}
+            {!partnerToken && (
+              <div className="flex justify-center gap-4 pt-3">
+                <button onClick={() => { setError(""); setMode("partner-login"); }} className="text-xs underline" style={{ color: MUTED }}>
+                  Partner login
+                </button>
+                <button onClick={() => { setError(""); setMode("partner-apply"); }} className="text-xs underline" style={{ color: MUTED }}>
+                  Become a partner (40% off)
+                </button>
+              </div>
             )}
             <button onClick={() => setMode("admin")} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>
               Super admin access
@@ -2157,6 +2467,66 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
               {busy ? "Checking…" : "Enter"}
             </button>
             <button onClick={() => setMode("choose")} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>Back</button>
+          </div>
+        )}
+
+        {mode === "partner-login" && (
+          <div className="text-left">
+            <p className="text-sm mb-3" style={{ color: MUTED }}>
+              Enter the partner code we emailed you when you were approved. Every report you generate while logged in is 40% off.
+            </p>
+            <input
+              value={partnerCodeInput}
+              onChange={(e) => setPartnerCodeInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && partnerCodeInput.trim() && submitPartnerLogin()}
+              placeholder="PARTNER-XXXXXXXX"
+              className="w-full border rounded px-2 py-2 text-sm mb-2"
+              style={{ borderColor: LINE }}
+            />
+            <button onClick={submitPartnerLogin} disabled={busy || !partnerCodeInput.trim()} className="w-full py-2.5 rounded text-sm font-medium" style={{ background: INK, color: "#fff" }}>
+              {busy ? "Checking…" : "Log in as partner"}
+            </button>
+            <button onClick={() => { setError(""); setMode("choose"); }} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>Back</button>
+          </div>
+        )}
+
+        {mode === "partner-apply" && (
+          <div className="text-left">
+            {applySubmitted ? (
+              <p className="text-sm p-3 rounded" style={{ background: GOLD_L }}>
+                ✓ Application received. If approved, we'll email your partner code to {applyForm.email}.
+              </p>
+            ) : (
+              <>
+                <p className="text-sm mb-3" style={{ color: MUTED }}>
+                  Apply to become an Oshin Capital partner and buy every report at 60% of the listed price. Applications are reviewed manually.
+                </p>
+                {[
+                  ["name", "Your name"],
+                  ["business", "Business / firm name"],
+                  ["email", "Email"],
+                  ["mobile", "Mobile number"],
+                ].map(([key, label]) => (
+                  <input
+                    key={key}
+                    value={applyForm[key]}
+                    onChange={(e) => setApplyForm((f) => ({ ...f, [key]: e.target.value }))}
+                    placeholder={label}
+                    className="w-full border rounded px-2 py-2 text-sm mb-2"
+                    style={{ borderColor: LINE }}
+                  />
+                ))}
+                <button
+                  onClick={submitPartnerApplication}
+                  disabled={busy || !applyForm.name || !applyForm.business || !applyForm.email || !applyForm.mobile}
+                  className="w-full py-2.5 rounded text-sm font-medium"
+                  style={{ background: GOLD, color: INK }}
+                >
+                  {busy ? "Submitting…" : "Submit application"}
+                </button>
+              </>
+            )}
+            <button onClick={() => { setError(""); setMode("choose"); }} className="w-full pt-3 text-xs underline" style={{ color: MUTED }}>Back</button>
           </div>
         )}
 
@@ -2260,6 +2630,8 @@ function PayGate({ onUnlock, projectCost = 0, onClose, reportType = "dpr", onSho
                 </div>
               )}
             </div>
+
+            <PartnerAdminSection adminToken={adminToken} />
 
             <div style={{ borderTop: `1px solid ${LINE}` }} className="pt-4 mt-4">
               <div className="flex items-center justify-between mb-3">
